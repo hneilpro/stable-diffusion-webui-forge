@@ -14,7 +14,7 @@ def try_install_bnb():
     try:
         if bitsandbytes_version != target_bitsandbytes_version:
             run_pip(
-                f"install -U bitsandbytes=={target_bitsandbytes_version}",
+                f"install -U --no-deps bitsandbytes=={target_bitsandbytes_version}",
                 f"bitsandbytes=={target_bitsandbytes_version}",
             )
     except Exception as e:
