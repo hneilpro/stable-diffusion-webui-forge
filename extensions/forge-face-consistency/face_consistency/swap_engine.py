@@ -22,6 +22,28 @@ import numpy as np
 OUTLIER_THRESHOLD = 0.35
 SAME_PERSON_THRESHOLD = 0.55
 
+# Detection resolution. buffalo_l's default (640) is fast; faces that are
+# small relative to the frame (full-body generations) are re-tried at 1280.
+DEFAULT_DET_SIZE = (640, 640)
+LARGE_DET_SIZE = (1280, 1280)
+LARGE_IMAGE_MIN = 768  # max(H, W) at/above this enables the 1280 retry
+
+
+def _ort_providers():
+    """onnxruntime providers: CUDA first when available, CPU always last.
+
+    onnxruntime falls back down the list automatically, so a machine
+    without onnxruntime-gpu simply runs on CPU — never a crash.
+    """
+    try:
+        import onnxruntime as ort
+
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    except Exception:
+        pass
+    return ["CPUExecutionProvider"]
+
 
 def _embedding_of(face_or_array):
     if isinstance(face_or_array, np.ndarray):
@@ -151,7 +173,7 @@ def gfpgan_restore(image, face, model_path):
     rgb = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB).astype(np.float32)
     blob = (rgb / 255.0 - 0.5) / 0.5
     blob = np.transpose(blob, (2, 0, 1))[None, ...]
-    sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    sess = ort.InferenceSession(model_path, providers=_ort_providers())
     out = sess.run(None, {sess.get_inputs()[0].name: blob})[0][0]
     out = np.clip((np.transpose(out, (1, 2, 0)) * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
     restored = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
@@ -195,11 +217,14 @@ def _first_existing(paths):
 class FaceSwapEngine:
     """Lazy InsightFace engine: detection + swap + verify + restore."""
 
-    def __init__(self, inswapper_path=None, gfpgan_path=None, forge_root=None):
+    def __init__(self, inswapper_path=None, gfpgan_path=None, forge_root=None,
+                 det_size=DEFAULT_DET_SIZE):
         cands_in, cands_gf = default_model_candidates(forge_root)
         self.inswapper_path = inswapper_path or _first_existing(cands_in)
         self.gfpgan_path = gfpgan_path or _first_existing(cands_gf)
         self._app = None
+        self._app_ctx = -1
+        self._det_size = tuple(det_size)
         self._swapper = None
         # Template cache: building the averaged identity (detect + embed
         # every reference) is the expensive part and is identical for
@@ -220,10 +245,39 @@ class FaceSwapEngine:
         if self._app is None:
             from insightface.app import FaceAnalysis
 
-            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-            app.prepare(ctx_id=-1, det_size=(640, 640))
+            providers = _ort_providers()
+            ctx_id = 0 if providers[0] == "CUDAExecutionProvider" else -1
+            app = FaceAnalysis(name="buffalo_l", providers=providers)
+            app.prepare(ctx_id=ctx_id, det_size=self._det_size)
             self._app = app
+            self._app_ctx = ctx_id
         return self._app
+
+    def _prepare_det_size(self, det_size):
+        det_size = tuple(det_size)
+        if det_size != self._det_size:
+            self.app.prepare(ctx_id=self._app_ctx, det_size=det_size)
+            self._det_size = det_size
+
+    def detect(self, image_bgr):
+        """Detect faces, escalating resolution for large images.
+
+        Standard pass at the default det_size; when nothing is found in
+        a large frame (typical for full-body generations where the face
+        is small), re-try once at 1280 before giving up. The detector is
+        restored to the default size afterwards.
+        """
+        faces = self.app.get(image_bgr)
+        if not faces:
+            h, w = image_bgr.shape[:2]
+            if max(h, w) >= LARGE_IMAGE_MIN and self._det_size[0] < LARGE_DET_SIZE[0]:
+                prev = self._det_size
+                try:
+                    self._prepare_det_size(LARGE_DET_SIZE)
+                    faces = self.app.get(image_bgr)
+                finally:
+                    self._prepare_det_size(prev)
+        return faces
 
     @property
     def swapper(self):
@@ -235,7 +289,7 @@ class FaceSwapEngine:
                     "inswapper_128.onnx not found; place it under "
                     "models/insightface/ (ReActor convention)")
             self._swapper = get_model(self.inswapper_path,
-                                      providers=["CPUExecutionProvider"])
+                                      providers=_ort_providers())
         return self._swapper
 
     def build_template(self, ref_source):
@@ -266,32 +320,41 @@ class FaceSwapEngine:
         if not refs:
             raise ValueError("no face detected in reference(s)")
         mean_emb, keep = template_embedding([f for _, _, f in refs])
-        base_face = refs[keep[0]][2]
+        # Drive the swapper with the sharpest kept reference face carrying
+        # the averaged identity: a sharp source gives inswapper cleaner
+        # geometry than the first file in sorted order.
+        kept = [refs[i] for i in keep]
+        base_face = max(
+            kept, key=lambda t: face_sharpness(t[1], t[2]) or -1.0)[2]
         # Drive the swapper with the averaged identity, scaled like the base.
         base_face.embedding = mean_emb * float(np.linalg.norm(base_face.embedding) or 1.0)
         base_face.normed_embedding = mean_emb
         return mean_emb, len(keep), base_face
 
     def similarity(self, ref_embedding, image_bgr):
-        faces = self.app.get(image_bgr)
+        """(cosine vs template, face count, largest face or None)."""
+        faces = self.detect(image_bgr)
         if not faces:
-            return None, 0
+            return None, 0, None
         face = largest(faces)
-        return cosine(ref_embedding, face.normed_embedding), len(faces)
+        return cosine(ref_embedding, face.normed_embedding), len(faces), face
 
     def swap(self, target_bgr, ref_source, restore=True):
         """Full swap + restore. Returns (out_bgr, info dict)."""
         template, n_sources, src_face = self.build_template(ref_source)
-        sim_before, nfaces = self.similarity(template, target_bgr)
-        if nfaces == 0:
+        sim_before, nfaces, dst = self.similarity(template, target_bgr)
+        if nfaces == 0 or dst is None:
             raise ValueError("no face detected in target image")
-        dst = largest(self.app.get(target_bgr))
+        h, w = target_bgr.shape[:2]
+        bw = max(0.0, dst.bbox[2] - dst.bbox[0])
+        bh = max(0.0, dst.bbox[3] - dst.bbox[1])
+        face_size_ratio = round((bw * bh) / max(1, h * w), 4)
         sharp_before = face_sharpness(target_bgr, dst)
         out = self.swapper.get(target_bgr, dst, src_face, paste_back=True)
         restored_by = "none"
         sharp_swapped = None
         if restore:
-            out_faces = self.app.get(out)
+            out_faces = self.detect(out)
             if out_faces:
                 out_face = largest(out_faces)
                 sharp_swapped = face_sharpness(out, out_face)
@@ -301,13 +364,14 @@ class FaceSwapEngine:
                 else:
                     out = restore_face(target_bgr, out, out_face)
                     restored_by = "detail-graft"
-        sim_after, _ = self.similarity(template, out)
-        out_faces = self.app.get(out)
+        sim_after, _, _ = self.similarity(template, out)
+        out_faces = self.detect(out)
         info = {
             "similarity_before": sim_before,
             "similarity_after": sim_after,
             "target_faces": nfaces,
             "identity_sources": n_sources,
+            "face_size_ratio": face_size_ratio,
             "face_sharpness_before": sharp_before,
             "face_sharpness_swapped": sharp_swapped,
             "face_sharpness": face_sharpness(out, largest(out_faces)) if out_faces else None,

@@ -142,3 +142,13 @@ def test_template_single_and_identical():
 
 def logic_cos(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+# --- onnxruntime provider selection -------------------------------------------
+
+def test_ort_providers_cpu_is_always_last():
+    from face_consistency.swap_engine import _ort_providers
+
+    provs = _ort_providers()
+    assert len(provs) >= 1
+    assert provs[-1] == "CPUExecutionProvider"

@@ -497,3 +497,111 @@ def test_template_cache_key_separates_sources():
     assert FaceSwapEngine._template_key(a) != FaceSwapEngine._template_key(b)
     assert FaceSwapEngine._template_key("/refs") == \
         FaceSwapEngine._template_key("/refs")
+
+
+# --- character LoRA prompt injection (settings-only, body-type lever) -------
+
+
+def _patch_lora(monkeypatch, name="tori_xl", weight=0.7):
+    monkeypatch.setattr(
+        mod, "_opt",
+        lambda n, d: {"ffc_lora_name": name,
+                      "ffc_lora_weight": weight}.get(n, d))
+
+
+def test_character_lora_injected_into_prompt(monkeypatch):
+    _patch_lora(monkeypatch)
+    p = _fake_p(sd_model=_sdxl_model(), prompt="a portrait",
+                all_prompts=["a portrait"])
+    _script().before_process(p, True, _b64_png(), "", 1.0, True)
+    assert "<lora:tori_xl:0.7>" in p.prompt
+    assert p.all_prompts == ["a portrait <lora:tori_xl:0.7>"]
+    assert p.extra_generation_params["FaceConsistency lora"] == \
+        "<lora:tori_xl:0.7>"
+
+
+def test_character_lora_dedup_when_already_present(monkeypatch):
+    _patch_lora(monkeypatch)
+    p = _fake_p(sd_model=_sdxl_model(),
+                prompt="a portrait <lora:tori_xl:0.5>",
+                all_prompts=["a portrait <lora:tori_xl:0.5>"])
+    _script().before_process(p, True, _b64_png(), "", 1.0, True)
+    assert p.prompt == "a portrait <lora:tori_xl:0.5>"
+    assert p.prompt.count("<lora:tori_xl:") == 1
+
+
+def test_character_lora_off_by_default():
+    p = _fake_p(sd_model=_sdxl_model(), prompt="a portrait",
+                all_prompts=["a portrait"])
+    _script().before_process(p, True, _b64_png(), "", 1.0, True)
+    assert p.prompt == "a portrait"
+    assert "FaceConsistency lora" not in p.extra_generation_params
+
+
+def test_character_lora_zero_weight_is_noop(monkeypatch):
+    _patch_lora(monkeypatch, weight=0.0)
+    p = _fake_p(sd_model=_sdxl_model(), prompt="a portrait",
+                all_prompts=["a portrait"])
+    _script().before_process(p, True, _b64_png(), "", 1.0, True)
+    assert p.prompt == "a portrait"
+
+
+# --- engine-aware representative selection ----------------------------------
+
+
+def _two_file_folder(tmp_path):
+    (tmp_path / "a.jpg").write_bytes(b"blurry")
+    (tmp_path / "b.png").write_bytes(b"sharp")
+    return {
+        str(tmp_path / "a.jpg"): np.full((4, 4, 3), 10, dtype=np.uint8),
+        str(tmp_path / "b.png"): np.full((4, 4, 3), 200, dtype=np.uint8),
+    }
+
+
+def test_representative_with_engine_picks_sharpest(monkeypatch, tmp_path):
+    rgbs = _two_file_folder(tmp_path)
+    monkeypatch.setattr(mod, "_load_rgb_from_path", lambda path: rgbs[path])
+    # sharpness keyed on pixel value: 200 (b.png) beats 10 (a.jpg)
+    monkeypatch.setattr("face_consistency.swap_engine.face_sharpness",
+                        lambda img, face: float(img[0, 0, 0]))
+    engine = SimpleNamespace(
+        detect=lambda bgr: [SimpleNamespace(bbox=(0, 0, 4, 4))])
+    rgb, note = mod.representative_rgb_for_unit(
+        None, str(tmp_path), engine=engine)
+    assert rgb[0, 0, 0] == 200
+    assert "b.png" in note and "sharpest face" in note
+
+
+def test_representative_with_engine_skips_faceless(monkeypatch, tmp_path):
+    rgbs = _two_file_folder(tmp_path)
+    monkeypatch.setattr(mod, "_load_rgb_from_path", lambda path: rgbs[path])
+    monkeypatch.setattr("face_consistency.swap_engine.face_sharpness",
+                        lambda img, face: float(img[0, 0, 0]))
+
+    def detect(bgr):
+        # a.jpg (value 10) has no detectable face
+        if bgr[0, 0, 0] == 10:
+            return []
+        return [SimpleNamespace(bbox=(0, 0, 4, 4))]
+
+    engine = SimpleNamespace(detect=detect)
+    rgb, note = mod.representative_rgb_for_unit(
+        None, str(tmp_path), engine=engine)
+    assert rgb[0, 0, 0] == 200
+    assert "no face" in note and "a.jpg" in note
+
+
+def test_representative_engine_failure_falls_back_to_first(monkeypatch,
+                                                          tmp_path):
+    rgbs = _two_file_folder(tmp_path)
+    monkeypatch.setattr(mod, "_load_rgb_from_path", lambda path: rgbs[path])
+
+    def boom(bgr):
+        raise RuntimeError("no insightface here")
+
+    engine = SimpleNamespace(detect=boom)
+    rgb, note = mod.representative_rgb_for_unit(
+        None, str(tmp_path), engine=engine)
+    # sorted-first decodable file wins, exactly like engine=None
+    assert rgb[0, 0, 0] == 10
+    assert "a.jpg" in note

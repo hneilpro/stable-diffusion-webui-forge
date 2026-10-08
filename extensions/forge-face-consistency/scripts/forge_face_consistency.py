@@ -177,27 +177,57 @@ def _load_rgb_from_path(path):
         return None
 
 
-def representative_rgb_for_unit(ref_image, refs_dir):
+def _unit_engine(p, refs_dir):
+    """FaceSwapEngine for reference selection, or None (never raises).
+
+    Only folder references benefit from face-aware selection; the common
+    single-image path keeps zero overhead.
+    """
+    if not refs_dir or not str(refs_dir).strip():
+        return None
+    try:
+        return _get_engine(p)
+    except Exception:
+        return None
+
+
+def representative_rgb_for_unit(ref_image, refs_dir, engine=None):
     """Concrete RGB image for a ControlNet unit.
 
     The unit conditions on one image, so a folder-only reference needs
     a representative file decoded here (the swap template path still
     uses the full folder). A non-empty folder overrides the single
-    image, matching the UI wording. Returns (rgb_or_None, source_note).
+    image, matching the UI wording. When ``engine`` is given, the
+    sharpest *detectable* face wins instead of the first file in sorted
+    order (a back-view or blurry photo must not become the identity
+    conditioning). Returns (rgb_or_None, source_note).
     """
     folder = str(refs_dir).strip() if refs_dir else ""
     if folder:
         # N2: try every folder file in sorted order until one decodes;
-        # a corrupt first file must not discard a usable folder.
+        # a corrupt first file must not discard an otherwise usable folder.
+        decoded = []
         skipped = []
         for rep_path in logic.list_ref_candidates(folder):
             rgb = _load_rgb_from_path(rep_path)
             if rgb is not None and rgb.size:
-                note = f"folder representative {rep_path}"
-                if skipped:
-                    note += f" (skipped unreadable: {', '.join(skipped)})"
+                decoded.append((rep_path, rgb))
+            else:
+                skipped.append(rep_path)
+        if engine is not None and decoded:
+            pick = _sharpest_decoded(decoded, engine.detect)
+            if pick is not None:
+                rep_path, rgb, note_extra = pick
+                note = f"folder representative {rep_path} (sharpest face)"
+                if note_extra:
+                    note += f" ({note_extra})"
                 return rgb, note
-            skipped.append(rep_path)
+            # else: fall through to first-decodable below
+        for rep_path, rgb in decoded:
+            note = f"folder representative {rep_path}"
+            if skipped:
+                note += f" (skipped unreadable: {', '.join(skipped)})"
+            return rgb, note
         if ref_image is not None:
             rgb = _ref_to_rgb(ref_image)
             if rgb is not None and rgb.size:
@@ -207,6 +237,38 @@ def representative_rgb_for_unit(ref_image, refs_dir):
     if rgb is not None and rgb.size:
         return rgb, "single image"
     return None, "no reference image"
+
+
+def _sharpest_decoded(decoded, detect):
+    """(path, rgb, note_extra) with the sharpest detectable face, or None.
+
+    ``detect`` is FaceSwapEngine.detect (bound). Never raises: any
+    detection failure falls back to first-decodable selection in the
+    caller.
+    """
+    try:
+        from face_consistency.swap_engine import face_sharpness, largest
+
+        best, best_s, noface = None, -1.0, []
+        for rep_path, rgb in decoded:
+            bgr = np.ascontiguousarray(rgb[..., ::-1])
+            try:
+                faces = detect(bgr)
+            except Exception:
+                faces = None
+            if not faces:
+                noface.append(rep_path)
+                continue
+            s = face_sharpness(bgr, largest(faces))
+            s = float(s) if s is not None else -1.0
+            if s > best_s:
+                best, best_s = (rep_path, rgb), s
+        if best is None:
+            return None
+        extra = f"no face: {', '.join(noface)}" if noface else ""
+        return best[0], best[1], extra
+    except Exception:
+        return None
 
 
 def _get_engine(p):
@@ -227,6 +289,45 @@ def _verify_threshold():
                           ffc_settings.DEFAULT_VERIFY_THRESHOLD))
     except (TypeError, ValueError):
         return ffc_settings.DEFAULT_VERIFY_THRESHOLD
+
+
+def _maybe_inject_character_lora(p, plan):
+    """Append the configured character LoRA tag to the prompt.
+
+    A character LoRA (trained on the person's photos) is the only
+    inference-time mechanism that preserves *body type* as well as the
+    face — face swap and FaceID/InstantID are face-only. The LoRA is
+    configured once under Settings -> Forge Face Consistency and applied
+    as ``<lora:name:weight>`` whenever the script is enabled. Never
+    duplicates a tag the user already placed, and never raises.
+    """
+    try:
+        name = str(_opt(ffc_settings.OPT_LORA_NAME,
+                        ffc_settings.DEFAULT_LORA_NAME) or "").strip()
+        try:
+            weight = float(_opt(ffc_settings.OPT_LORA_WEIGHT,
+                                ffc_settings.DEFAULT_LORA_WEIGHT) or 0.0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        if not name or weight <= 0:
+            return
+        marker = f"<lora:{name}:"
+        tag = f"<lora:{name}:{weight:g}>"
+        prompt = getattr(p, "prompt", "") or ""
+        if marker in prompt:
+            plan["lora_tag"] = f"{tag} (already present)"
+            return
+        p.prompt = (prompt + " " + tag).strip()
+        allp = getattr(p, "all_prompts", None)
+        if allp:
+            p.all_prompts = [
+                ap if marker in ap else (ap + " " + tag).strip() for ap in allp
+            ]
+        plan["lora_tag"] = tag
+        p.extra_generation_params["FaceConsistency lora"] = tag
+        _log(f"character LoRA injected: {tag}")
+    except Exception as exc:
+        _log(f"character LoRA injection skipped ({exc})")
 
 
 def _build_controlnet_unit(preprocessor_name, model_name, weight, ref_rgb):
@@ -342,6 +443,7 @@ if _FORGE_AVAILABLE:
                 plan["reason"] = "enabled but no reference image or folder given"
                 _log("enabled with no reference; doing nothing")
                 return
+            _maybe_inject_character_lora(p, plan)
             try:
                 family = _detect_family_forge(p)
                 adapter, _names = _available_adapters()
@@ -353,8 +455,10 @@ if _FORGE_AVAILABLE:
                     # F1: the unit needs a concrete image. A folder-only (or
                     # folder-overriding) reference must hand ControlNet a
                     # decoded representative, never np.asarray(None).
+                    # With an engine, the sharpest detectable face wins over
+                    # the first file in sorted order.
                     unit_rgb, unit_src = representative_rgb_for_unit(
-                        ref_image, refs_dir)
+                        ref_image, refs_dir, engine=_unit_engine(p, refs_dir))
                     if unit_rgb is None:
                         mode = "blended-swap"
                         plan.update(mode=mode, downgraded=True,
@@ -478,6 +582,14 @@ if _FORGE_AVAILABLE:
                         if info.get("similarity_after") is not None else "n/a"),
                     "FaceConsistency restored by": info.get("restored_by", "none"),
                 })
+                ratio = info.get("face_size_ratio")
+                if ratio is not None:
+                    p.extra_generation_params["FaceConsistency face size"] = (
+                        f"{ratio:.1%} of image")
+                    if ratio < 0.02:
+                        p.extra_generation_params["FaceConsistency note"] = (
+                            "small target face (<2% of image); a closer crop "
+                            "swaps more reliably")
                 # F4: the verify threshold is consumed here — a swap that
                 # lands below it is warned on, not reported like a pass.
                 threshold = plan.get("verify_threshold", _verify_threshold())
@@ -534,6 +646,17 @@ if _FORGE_AVAILABLE:
             section=section))
         shared.opts.add_option(ffc_settings.OPT_INSWAPPER_PATH, shared.OptionInfo(
             "", "Path to inswapper_128.onnx (empty = models/insightface convention)",
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_LORA_NAME, shared.OptionInfo(
+            ffc_settings.DEFAULT_LORA_NAME,
+            "Character LoRA name (a file in models/Lora, without extension). "
+            "Appended as <lora:name:weight> when the script is enabled — "
+            "this is what preserves body type as well as the face.",
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_LORA_WEIGHT, shared.OptionInfo(
+            ffc_settings.DEFAULT_LORA_WEIGHT,
+            "Character LoRA weight (0 = off)",
+            gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.05},
             section=section))
 
     on_ui_settings(_on_ui_settings)

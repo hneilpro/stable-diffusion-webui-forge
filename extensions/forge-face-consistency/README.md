@@ -13,11 +13,37 @@ chosen face consistent across SDXL and Flux generations in
 Every run writes the mode actually used (`faceid` / `instantid` /
 `blended-swap` / `swap`) and the strength into the image infotext. The
 swap and blended-swap paths also record the ArcFace similarity
-before/after, plus a warning when the result lands below the verify
-threshold (Settings → Forge Face Consistency). The ControlNet reference
-paths form identity during diffusion, so their similarity is recorded as
-`n/a (controlnet)` rather than measured. A downgrade (e.g. Flux below
-max, or no adapter found) is always recorded — never silent.
+before/after, the target face's share of the image, plus a warning when
+the result lands below the verify threshold (Settings → Forge Face
+Consistency). The ControlNet reference paths form identity during
+diffusion, so their similarity is recorded as `n/a (controlnet)` rather
+than measured. A downgrade (e.g. Flux below max, or no adapter found) is
+always recorded — never silent.
+
+Face detection runs at 640px and automatically re-tries at 1280px for
+large frames where no face was found (full-body generations). When
+several reference photos are given, the sharpest detectable face drives
+the swapper and the ControlNet unit — not the first file alphabetically.
+InsightFace and GFPGAN run on CUDA when `onnxruntime-gpu` is present,
+falling back to CPU otherwise.
+
+## Character LoRA — preserving body type, not just the face
+
+Face swap and FaceID/InstantID only carry the *face*; the body comes
+from the prompt and the base model. To keep the same body type across
+poses and outfits, train a small character LoRA on 6–20 photos of the
+person (varied backgrounds, lighting, and clothing; include half-body
+shots), then set **Settings → Forge Face Consistency → Character LoRA
+name** (a file in `models/Lora`, without extension) and **weight**
+(0.6–0.8 is a good start). The script appends
+`<lora:name:weight>` to the prompt on every enabled run, so identity
+(face + body) is baked into the diffusion itself and the swap/FaceID
+path locks the face on top.
+
+Practical training recipe (SDXL, single 24 GB GPU): rank 16–32,
+learning rate 1e-4, ~100–200 steps per image, bf16 — about 10–30
+minutes with kohya sd-scripts or ai-toolkit. Name the file after the
+character (e.g. `tori_xl.safetensors`) and put that name in the setting.
 
 ## Use
 
