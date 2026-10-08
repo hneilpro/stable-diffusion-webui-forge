@@ -127,6 +127,44 @@ unavailable or no pose is found, the gate degrades to a loud infotext
 note, never a silent skip. Waist:hip is deliberately not measured:
 keypoints carry no waist landmark, and guessing it would be dishonest.
 
+### Torso consistency — chest and belly button
+
+No AI generator pins chest or navel identity specifically; every
+system works at whole-character granularity. What this extension does
+instead, on top of the body-proportion gate:
+
+- **Torso reference slot** (Settings → Forge Face Consistency →
+  `ffc_torso_ref_dir`, plus the per-generation *Torso reference
+  strength* slider, default 0.45). A general IP-Adapter ControlNet
+  unit conditioned on a square torso crop of the first readable image
+  in the folder — pose-based crop when the annotator finds
+  shoulders+hips, center square crop otherwise. Must be the
+  *general/Plus* adapter; FaceID variants are face-only by
+  architecture and are excluded by the picker, exactly like the
+  outfit slot. Same model the outfit slot needs
+  (`ip-adapter_sdxl.safetensors` in `models/ControlNet`); Flux skips
+  loudly.
+- **Depth lock** (optional, `ffc_torso_depth_weight`, default 0 = off).
+  A depth ControlNet unit on the same torso crop, for geometric
+  anchoring of breast volume and waist curve. Needs a depth ControlNet
+  model in `models/ControlNet`; missing model or busy slots degrade
+  to a loud infotext note.
+- **Navel gate** (warn-only, `ffc_navel_gate`, default `warn`). The
+  expected navel pixel is computed from the pose keypoints via the
+  torso standard (midline, 15% of the way from waist to crotch); the
+  detected navel comes from template-matching a reference navel crop
+  (`ffc_navel_template`) inside the waist ROI with normalized
+  cross-correlation. Deviations beyond 0.20 head heights warn in the
+  infotext (`FaceConsistency navel`). There is deliberately no reject
+  mode: the honest ceiling is stable navel *position*, never
+  pixel-identical identity.
+- **Navel detailer** (optional, `ffc_navel_detailer`, default off).
+  After generation, the navel ROI is cropped, upscaled 3×, re-rendered
+  with a low-denoise (0.35) img2img pass, and feathered back in — the
+  same crop/upscale/img2img/paste-back pattern as the hand fix. This
+  stabilizes navel position and cleans up rendering; it regenerates
+  the navel rather than transplanting identity.
+
 ## Use
 
 1. Open the **Forge Face Consistency** accordion (txt2img or img2img).

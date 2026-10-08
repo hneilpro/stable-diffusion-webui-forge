@@ -147,6 +147,23 @@ def list_face_ipadapter_models(controlnet_names):
     return sorted(found)
 
 
+def find_depth_model(controlnet_names):
+    """Depth ControlNet model name, or None.
+
+    Matches display names containing 'depth' (e.g. the diffusers/SDXL
+    depth models). Deterministic: sorted, first match. Used for the
+    optional torso depth-lock unit; a missing model is a loud skip,
+    never an error.
+    """
+    cands = []
+    for name in (controlnet_names or []):
+        if not name or name == "None":
+            continue
+        if "depth" in name.lower():
+            cands.append(name)
+    return sorted(cands)[0] if cands else None
+
+
 def pick_ipadapter_preprocessor(model_name, family):
     """CLIP-vision preprocessor for a general IP-Adapter model.
 

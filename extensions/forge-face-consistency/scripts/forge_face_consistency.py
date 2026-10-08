@@ -33,6 +33,19 @@ warning; "reject" aborts the generation before the image is presented.
 The pure measurement/assessment logic lives in
 face_consistency.body_gate (importable and unit-tested without Forge).
 
+The torso-consistency upgrade adds a third, independent control --
+Torso reference strength -- driven by a reference *folder* configured
+under Settings (the torso does not change per generation the way an
+outfit does). It injects a general IP-Adapter unit conditioned on a
+square torso crop (pose-based when the annotator cooperates, center
+crop otherwise), plus an optional depth-lock ControlNet unit for
+geometric anchoring. After generation, the navel gate
+(face_consistency.torso, warn-only) checks the navel position against
+the torso standard, and the optional navel detailer pass re-renders
+the navel ROI at higher resolution -- the same crop/upscale/img2img/
+paste-back pattern as the hand fix. The honest ceiling is stable
+navel position plus clean rendering, never a pixel-identical navel.
+
 The pure decision logic lives in face_consistency.logic (importable and
 unit-tested without Forge); this module is the Forge-facing shell.
 """
@@ -52,6 +65,7 @@ if _EXT_DIR not in sys.path:
 
 from face_consistency import logic  # noqa: E402
 from face_consistency import settings as ffc_settings  # noqa: E402
+from face_consistency import torso as torso_mod  # noqa: E402
 
 try:
     import gradio as gr
@@ -170,6 +184,29 @@ def _ref_to_rgb(ref_image):
     if arr.shape[-1] == 4:
         arr = arr[..., :3]
     return np.ascontiguousarray(arr)
+
+
+def _pp_to_rgb(pp):
+    """Generated image (PIL or numpy) -> RGB numpy array, or None.
+
+    Never raises. The live path hands us PIL; the offline tests hand
+    us numpy -- handle both.
+    """
+    try:
+        img = pp.image
+        if hasattr(img, "convert"):
+            try:
+                img = img.convert("RGB")
+            except Exception:
+                pass
+        arr = np.asarray(img)
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
+        if arr.ndim != 3 or arr.size == 0:
+            return None
+        return np.ascontiguousarray(arr[..., :3])
+    except Exception:
+        return None
 
 
 def _ref_to_bgr(ref_image):
@@ -418,7 +455,7 @@ def _head_bbox_for_gate(p, image_bgr):
         return None
 
 
-def _run_body_gate(p, pp):
+def _run_body_gate(p, pp, precomputed=None):
     """Body-proportion gate on the generated image.
 
     Runs for every enabled generation whose mode is not "disabled"
@@ -428,20 +465,28 @@ def _run_body_gate(p, pp):
     proportions deviate from the reference profile beyond tolerance.
     Never raises in "warn"/"off" modes; a broken provider degrades to
     a loud infotext note, never a silent skip.
+
+    ``precomputed`` is an optional (image_bgr, keypoints) tuple so the
+    caller can share one pose detection across the body gate, the
+    navel gate, and the navel detailer.
     """
     from face_consistency import body_gate as body_gate_mod
 
     mode, tolerance, reference = _body_gate_config()
     if str(mode).strip().lower() == "off":
         return
-    try:
-        import cv2
+    if precomputed is not None:
+        image_bgr, keypoints = precomputed
+    else:
+        image_bgr, keypoints = None, None
+        try:
+            import cv2
 
-        image_bgr = cv2.cvtColor(np.asarray(pp.image), cv2.COLOR_RGB2BGR)
-    except Exception as exc:
-        _log(f"body gate skipped: cannot decode image ({exc})")
-        return
-    keypoints = _detect_body_keypoints(p, image_bgr)
+            image_bgr = cv2.cvtColor(np.asarray(pp.image), cv2.COLOR_RGB2BGR)
+        except Exception as exc:
+            _log(f"body gate skipped: cannot decode image ({exc})")
+            return
+        keypoints = _detect_body_keypoints(p, image_bgr)
     if not keypoints:
         note = ("body gate: no pose detected"
                 if _get_pose_detector(p) is not None
@@ -570,6 +615,375 @@ def _maybe_inject_outfit_reference(p, plan, outfit_rgb, outfit_weight):
         _log(note)
 
 
+def _torso_representative_rgb(folder):
+    """(path, rgb_or_None) -- first decodable image in the torso folder.
+
+    Unlike the face path, no face-aware selection: the folder is
+    expected to hold torso crops/photos, and sharpness-of-face is the
+    wrong criterion. Never raises.
+    """
+    try:
+        for rep_path in logic.list_ref_candidates(folder):
+            rgb = _load_rgb_from_path(rep_path)
+            if rgb is not None and rgb.size:
+                return rep_path, rgb
+    except Exception as exc:
+        _log(f"torso folder listing failed ({exc})")
+    return None, None
+
+
+def _torso_square_crop(p, rgb):
+    """Square torso crop for the IP-Adapter / depth units.
+
+    Pose-based (shoulders->hips with margin) when the annotator finds a
+    pose in the reference, otherwise a deterministic center square
+    crop. Never raises; never returns None for a usable input.
+    """
+    try:
+        bgr = np.ascontiguousarray(rgb[..., ::-1])
+        kp = _detect_body_keypoints(p, bgr)
+        if kp:
+            box = torso_mod.torso_box_for_crop(kp, rgb.shape[1],
+                                               rgb.shape[0])
+            if box:
+                x0, y0, x1, y1 = box
+                _log(f"torso crop: pose-based box {box}")
+                return np.ascontiguousarray(rgb[y0:y1, x0:x1])
+    except Exception as exc:
+        _log(f"torso crop: pose crop failed ({exc}); center crop")
+    h, w = rgb.shape[:2]
+    side = min(h, w)
+    y0 = (h - side) // 2
+    x0 = (w - side) // 2
+    return np.ascontiguousarray(rgb[y0:y0 + side, x0:x0 + side])
+
+
+def _maybe_inject_torso_reference(p, plan, torso_weight, depth_weight):
+    """Torso consistency: IP-Adapter unit (+ optional depth-lock unit).
+
+    A third, independent reference path beside the face and outfit
+    slots: a general IP-Adapter ControlNet unit conditioned on a square
+    torso crop from the configured reference folder, at
+    ``torso_weight`` (default 0.45 -- below the weight where the
+    adapter starts dominating the prompt). Optionally a depth ControlNet
+    unit on the same crop for geometric anchoring (breast volume, waist
+    curve). Needs the same general IP-Adapter model the outfit slot
+    needs; Flux skips loudly. Never raises; every outcome is recorded
+    in the infotext.
+    """
+    try:
+        folder = str(_opt(ffc_settings.OPT_TORSO_REF_DIR,
+                          ffc_settings.DEFAULT_TORSO_REF_DIR)
+                     or "").strip()
+        if not folder or not os.path.isdir(folder):
+            note = ("torso reference skipped: ffc_torso_ref_dir not set "
+                    "or not a folder (Settings -> Forge Face Consistency)")
+            p.extra_generation_params["FaceConsistency torso ref"] = note
+            _log(note)
+            return
+        family = plan.get("family") or _detect_family_forge(p)
+        if family == "flux":
+            note = ("torso reference skipped: no Flux IP-Adapter "
+                    "in this Forge build")
+            p.extra_generation_params["FaceConsistency torso ref"] = note
+            _log(note)
+            return
+        rep_path, rgb = _torso_representative_rgb(folder)
+        if rgb is None:
+            note = (f"torso reference skipped: no readable image in "
+                    f"{folder}")
+            p.extra_generation_params["FaceConsistency torso ref"] = note
+            _log(note)
+            return
+        crop = _torso_square_crop(p, rgb)
+        _adapter, names = _available_adapters()
+        injected = []
+        if torso_weight > 0:
+            model = logic.find_ipadapter_model(names)
+            if model is None:
+                note = ("torso IP-Adapter skipped: no general IP-Adapter "
+                        "model found (same model the outfit slot needs: "
+                        "ip-adapter_sdxl.safetensors in models/ControlNet)")
+                _log(note)
+            else:
+                preprocessor = logic.pick_ipadapter_preprocessor(
+                    model, family)
+                unit = _build_controlnet_unit(preprocessor, model,
+                                              float(torso_weight), crop)
+                if _inject_controlnet_unit(p, unit):
+                    injected.append(
+                        f"ip-adapter {model} @ {float(torso_weight):.2f}")
+                    _log(f"torso reference injected: {model} @ "
+                         f"{float(torso_weight):.2f} from {rep_path}")
+                else:
+                    _log("torso IP-Adapter skipped: no free ControlNet slot")
+        if depth_weight > 0:
+            dmodel = logic.find_depth_model(names)
+            if dmodel is None:
+                _log("torso depth lock skipped: no depth ControlNet model "
+                     "found in models/ControlNet")
+            else:
+                dpre = str(_opt(
+                    ffc_settings.OPT_TORSO_DEPTH_PREPROCESSOR,
+                    ffc_settings.DEFAULT_TORSO_DEPTH_PREPROCESSOR)
+                    or "depth_midas").strip()
+                unit = _build_controlnet_unit(dpre, dmodel,
+                                              float(depth_weight), crop)
+                if _inject_controlnet_unit(p, unit):
+                    injected.append(
+                        f"depth {dmodel} @ {float(depth_weight):.2f}")
+                    _log(f"torso depth lock injected: {dmodel} @ "
+                         f"{float(depth_weight):.2f} ({dpre})")
+                else:
+                    _log("torso depth lock skipped: no free ControlNet slot")
+        p.extra_generation_params["FaceConsistency torso ref"] = (
+            "injected: " + ", ".join(injected) if injected
+            else "skipped (see log)")
+    except Exception as exc:
+        note = f"torso reference failed: {exc}"
+        try:
+            p.extra_generation_params["FaceConsistency torso ref"] = note
+        except Exception:
+            pass
+        _log(note)
+
+
+def _run_navel_gate(p, pp, image_rgb=None, image_bgr=None, keypoints=None):
+    """Navel-position gate (warn-only) on the generated image.
+
+    The expected navel pixel comes from the pose keypoints via the
+    torso standard (midline, 15% waist->crotch); the detected navel
+    comes from template-matching a reference navel crop inside the
+    waist ROI. Deviations beyond the tolerance warn in the infotext.
+    Never raises; a missing template or pose degrades to a loud note,
+    never a silent skip. There is deliberately no "reject" mode: the
+    honest ceiling is stable position, not pixel identity.
+    """
+    mode = str(_opt(ffc_settings.OPT_NAVEL_GATE,
+                    ffc_settings.DEFAULT_NAVEL_GATE) or "off").strip().lower()
+    if mode == "off":
+        return
+    try:
+        if image_rgb is None:
+            image_rgb = _pp_to_rgb(pp)
+        if image_rgb is None:
+            note = "navel gate: cannot decode generated image"
+            p.extra_generation_params["FaceConsistency navel"] = note
+            _log(f"WARNING: {note}")
+            return
+        if keypoints is None:
+            try:
+                if image_bgr is None:
+                    import cv2
+
+                    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+                keypoints = _detect_body_keypoints(p, image_bgr)
+            except Exception as exc:
+                note = f"navel gate: pose detection failed ({exc})"
+                p.extra_generation_params["FaceConsistency navel"] = note
+                _log(f"WARNING: {note}")
+                return
+        if not keypoints:
+            note = "navel gate: no pose detected; navel position not verified"
+            p.extra_generation_params["FaceConsistency navel"] = note
+            _log(f"WARNING: {note}")
+            return
+        expected = torso_mod.expected_navel_px(keypoints)
+        if expected is None:
+            note = ("navel gate: shoulders/hips missing; "
+                    "navel position not verified")
+            p.extra_generation_params["FaceConsistency navel"] = note
+            _log(f"WARNING: {note}")
+            return
+        template_path = str(_opt(ffc_settings.OPT_NAVEL_TEMPLATE,
+                                 ffc_settings.DEFAULT_NAVEL_TEMPLATE)
+                            or "").strip()
+        if not template_path or not os.path.isfile(template_path):
+            note = ("navel gate: no navel template configured "
+                    "(ffc_navel_template); navel position not verified")
+            p.extra_generation_params["FaceConsistency navel"] = note
+            _log(f"WARNING: {note}")
+            return
+        tpl = _load_rgb_from_path(template_path)
+        if tpl is None:
+            note = ("navel gate: navel template unreadable; "
+                    "navel position not verified")
+            p.extra_generation_params["FaceConsistency navel"] = note
+            _log(f"WARNING: {note}")
+            return
+        h, w = image_rgb.shape[:2]
+        side = torso_mod.crop_side_px(w, h, 0.30, 96)
+        box = torso_mod.square_box(w, h, expected[0], expected[1], side)
+        if box is None:
+            note = "navel gate: waist ROI unusable; not verified"
+            p.extra_generation_params["FaceConsistency navel"] = note
+            _log(f"WARNING: {note}")
+            return
+        x0, y0, x1, y1 = box
+        roi = image_rgb[y0:y1, x0:x1]
+        cx, cy, score = torso_mod.ncc_detect(roi, tpl)
+        detected = (x0 + cx, y0 + cy) if cx is not None else None
+        head_h = None
+        if image_bgr is None:
+            import cv2
+
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        bbox = _head_bbox_for_gate(p, image_bgr)
+        if bbox:
+            head_h = bbox[3] - bbox[1]
+        dev_heads, warning = torso_mod.assess_navel(
+            expected, detected, score, head_h)
+        report = (f"expected=({expected[0]:.0f},{expected[1]:.0f}) "
+                  f"detected="
+                  f"({detected[0]:.0f},{detected[1]:.0f})"
+                  if detected else "detected=n/a")
+        report += f" score={score:.2f}"
+        if dev_heads is not None:
+            report += f" deviation={dev_heads:.2f} heads"
+        if warning:
+            p.extra_generation_params["FaceConsistency navel"] = (
+                f"WARNING: {warning} [{report}]")
+            _log(f"WARNING: navel gate: {warning} [{report}]")
+        else:
+            p.extra_generation_params["FaceConsistency navel"] = (
+                f"ok [{report}]")
+            _log(f"navel gate ok [{report}]")
+    except Exception as exc:
+        note = f"navel gate failed: {exc}"
+        try:
+            p.extra_generation_params["FaceConsistency navel"] = note
+        except Exception:
+            pass
+        _log(note)
+
+
+def _maybe_run_navel_detailer(p, pp, keypoints=None):
+    """Navel detailer pass: crop the navel ROI, upscale, low-denoise
+    img2img, feathered paste-back.
+
+    The same pattern as the hand fix that works (crop -> 3x upscale ->
+    img2img -> downscale -> feathered paste). Cleans up navel rendering
+    and restores a stable navel position; it regenerates the navel,
+    never transplants identity -- the honest ceiling. Default off
+    (Settings -> Forge Face Consistency -> navel detailer). Never
+    raises; the nested generation is flagged so this script ignores it
+    (no recursion).
+    """
+    try:
+        if not bool(_opt(ffc_settings.OPT_NAVEL_DETAILER,
+                         ffc_settings.DEFAULT_NAVEL_DETAILER)):
+            return
+        if getattr(p, "_ffc_nested", False):
+            return
+        from PIL import Image
+
+        image_rgb = _pp_to_rgb(pp)
+        if image_rgb is None:
+            note = "navel detailer skipped: cannot decode generated image"
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+            _log(note)
+            return
+        if keypoints is None:
+            import cv2
+
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            keypoints = _detect_body_keypoints(p, image_bgr)
+        if not keypoints:
+            note = "navel detailer skipped: no pose detected"
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+            _log(note)
+            return
+        expected = torso_mod.expected_navel_px(keypoints)
+        if expected is None:
+            note = "navel detailer skipped: shoulders/hips missing"
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+            _log(note)
+            return
+        h, w = image_rgb.shape[:2]
+        side = torso_mod.crop_side_px(w, h, 0.18, 128)
+        box = torso_mod.square_box(w, h, expected[0], expected[1], side)
+        if box is None:
+            note = "navel detailer skipped: navel ROI unusable"
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+            _log(note)
+            return
+        x0, y0, x1, y1 = box
+        crop = image_rgb[y0:y1, x0:x1]
+        up = Image.fromarray(crop).resize(
+            (crop.shape[1] * 3, crop.shape[0] * 3), Image.LANCZOS)
+        fixed = _img2img_navel_pass(p, up)
+        if fixed is None:
+            note = ("navel detailer skipped: img2img pass failed "
+                    "(see log)")
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+            _log(note)
+            return
+        fixed_small = fixed.resize((x1 - x0, y1 - y0), Image.LANCZOS)
+        from face_consistency import blend as blend_mod
+
+        mask = blend_mod.feather_mask((h, w), box, feather=6.0)
+        out = blend_mod.blend_images(
+            image_rgb, np.asarray(fixed_small.convert("RGB")), mask, 1.0)
+        pp.image = Image.fromarray(out)
+        note = (f"applied (ROI {x1 - x0}px at "
+                f"({expected[0]:.0f},{expected[1]:.0f}), 3x, denoise 0.35)")
+        p.extra_generation_params["FaceConsistency navel detailer"] = note
+        _log(f"navel detailer {note}")
+    except Exception as exc:
+        note = f"navel detailer failed: {exc}"
+        try:
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+        except Exception:
+            pass
+        _log(note)
+
+
+def _img2img_navel_pass(p, init_pil):
+    """One low-denoise img2img pass over the upscaled navel crop.
+
+    Returns a PIL RGB image, or None on any failure. The processing
+    object is flagged _ffc_nested so this script's own hooks ignore the
+    nested generation (no recursion, no double gates).
+    """
+    try:
+        from modules import processing, shared
+
+        w, h = init_pil.size
+        user_neg = getattr(p, "negative_prompt", "") or ""
+        neg = ("deformed, disfigured, cartoon, drawing, blurry, "
+               "watermark, text")
+        p2 = processing.StableDiffusionProcessingImg2Img(
+            init_images=[init_pil],
+            prompt=("close-up of a natural human navel, smooth realistic "
+                    "skin, photorealistic, high detail"),
+            negative_prompt=(user_neg + ", " + neg).strip(", "),
+            seed=getattr(p, "seed", -1),
+            steps=20,
+            cfg_scale=float(getattr(p, "cfg_scale", 7.0) or 7.0),
+            denoising_strength=0.35,
+            width=w,
+            height=h,
+            sd_model=getattr(shared, "sd_model", None),
+        )
+        p2.script_args = []
+        p2._ffc_nested = True
+        processed = processing.process_images(p2)
+        images = getattr(processed, "images", None) or []
+        if not images:
+            _log("navel detailer: img2img returned no images")
+            return None
+        return images[0].convert("RGB")
+    except Exception as exc:
+        _log(f"navel detailer: img2img pass failed ({exc})")
+        return None
+
+
 def _build_controlnet_unit(preprocessor_name, model_name, weight, ref_rgb):
     """ControlNetUnit matching this clone's lib_controlnet.external_code.
 
@@ -651,6 +1065,8 @@ if _FORGE_AVAILABLE:
             default_restore = bool(_opt(ffc_settings.OPT_RESTORE, ffc_settings.DEFAULT_RESTORE))
             default_outfit_strength = float(_opt(ffc_settings.OPT_OUTFIT_STRENGTH,
                                                  ffc_settings.DEFAULT_OUTFIT_STRENGTH))
+            default_torso_strength = float(_opt(ffc_settings.OPT_TORSO_STRENGTH,
+                                                ffc_settings.DEFAULT_TORSO_STRENGTH))
             with InputAccordion(default_enabled, label=SCRIPT_NAME,
                                 elem_id="ffc_accordion") as enabled:
                 ref_image = gr.Image(label="Reference face", type="numpy")
@@ -669,19 +1085,25 @@ if _FORGE_AVAILABLE:
                     label="Outfit reference strength (0 = off)",
                     minimum=0.0, maximum=1.0, step=0.01,
                     value=default_outfit_strength)
+                torso_strength = gr.Slider(
+                    label="Torso reference strength (0 = off)",
+                    minimum=0.0, maximum=1.0, step=0.01,
+                    value=default_torso_strength)
             self.infotext_fields = [
                 (enabled, "FaceConsistency enabled"),
                 (strength, "FaceConsistency strength"),
             ]
             return (enabled, ref_image, refs_dir, strength, restore,
-                    outfit_image, outfit_strength)
+                    outfit_image, outfit_strength, torso_strength)
 
         # -- decision + ControlNet injection (runs before sampling) -------
-        # New args (outfit_image, outfit_strength) append at the end with
-        # defaults, so older 5-arg API calls keep working.
+        # New args (outfit_image, outfit_strength, torso_strength) append
+        # at the end with defaults, so older 5-arg and 7-arg API calls
+        # keep working.
         def before_process(self, p, enabled=False, ref_image=None, refs_dir="",
                            strength=1.0, restore=True,
-                           outfit_image=None, outfit_strength=0.0):
+                           outfit_image=None, outfit_strength=0.0,
+                           torso_strength=0.0):
             # New generation: drop any engine cached by a previous run so
             # a changed inswapper path is honoured.
             if hasattr(p, "_ffc_engine"):
@@ -697,9 +1119,20 @@ if _FORGE_AVAILABLE:
                             or (refs_dir and str(refs_dir).strip()))
             outfit_rgb = _ref_to_rgb(outfit_image)
             outfit_w = logic.clamp_strength(outfit_strength)
-            if not has_face_ref and outfit_rgb is None:
-                plan["reason"] = ("enabled but no face reference or "
-                                   "outfit reference given")
+            torso_w = logic.clamp_strength(torso_strength)
+            torso_dir = str(_opt(ffc_settings.OPT_TORSO_REF_DIR,
+                                 ffc_settings.DEFAULT_TORSO_REF_DIR)
+                            or "").strip()
+            try:
+                depth_w = float(_opt(ffc_settings.OPT_TORSO_DEPTH_WEIGHT,
+                                     ffc_settings.DEFAULT_TORSO_DEPTH_WEIGHT)
+                                or 0.0)
+            except (TypeError, ValueError):
+                depth_w = 0.0
+            has_torso_ref = bool(torso_dir) and (torso_w > 0 or depth_w > 0)
+            if not has_face_ref and outfit_rgb is None and not has_torso_ref:
+                plan["reason"] = ("enabled but no face, outfit, or torso "
+                                   "reference given")
                 _log("enabled with no reference; doing nothing")
                 return
             _maybe_inject_character_lora(p, plan)
@@ -760,12 +1193,23 @@ if _FORGE_AVAILABLE:
                     plan["ref_bgr"] = _ref_to_bgr(ref_image)
                     plan["refs_dir"] = str(refs_dir).strip() if refs_dir else ""
                 if not has_face_ref:
-                    # Outfit-only run: the face decision above never ran.
-                    plan["mode"] = "outfit-only"
-                    plan["reason"] = "no face reference; outfit reference only"
+                    # Faceless run: the face decision above never ran.
+                    if outfit_rgb is not None and has_torso_ref:
+                        plan["mode"] = "outfit+torso"
+                        plan["reason"] = ("no face reference; outfit and "
+                                           "torso references only")
+                    elif has_torso_ref:
+                        plan["mode"] = "torso-only"
+                        plan["reason"] = "no face reference; torso reference only"
+                    else:
+                        plan["mode"] = "outfit-only"
+                        plan["reason"] = ("no face reference; outfit "
+                                           "reference only")
                 if outfit_rgb is not None and outfit_w > 0:
                     _maybe_inject_outfit_reference(p, plan, outfit_rgb,
                                                    outfit_w)
+                if has_torso_ref:
+                    _maybe_inject_torso_reference(p, plan, torso_w, depth_w)
             except Exception as exc:
                 # Setup failure must never kill the host generation or
                 # vanish silently: live round 2 (2026-10-08) showed an
@@ -803,27 +1247,52 @@ if _FORGE_AVAILABLE:
         # -- swap / blended swap (per generated image) --------------------
         def postprocess_image(self, p, pp, enabled=False, ref_image=None,
                               refs_dir="", strength=1.0, restore=True,
-                              outfit_image=None, outfit_strength=0.0):
+                              outfit_image=None, outfit_strength=0.0,
+                              torso_strength=0.0):
             plan = getattr(p, "_ffc_plan", None)
             if not plan or not plan.get("enabled"):
                 return
-            # Body-proportion gate: the body comes from diffusion in every
-            # mode (only the face is ever swapped), so this runs before
-            # the mode early-return. In "reject" mode a failing body
-            # aborts the generation here -- before the image is presented.
+            if getattr(p, "_ffc_nested", False):
+                return  # nested navel-detailer generation: leave it alone
+            # One pose detection per image, shared by the body gate, the
+            # navel gate and the navel detailer. The body comes from
+            # diffusion in every mode (only the face is ever swapped),
+            # so the gates run before the mode early-return; in "reject"
+            # mode a failing body aborts here, before the image is
+            # presented. The face swap never moves the torso, so the
+            # keypoints stay valid for the detailer after the swap.
+            image_rgb, image_bgr, keypoints = None, None, None
             if plan["mode"] != "disabled":
-                _run_body_gate(p, pp)
+                image_rgb = _pp_to_rgb(pp)
+                if image_rgb is None:
+                    _log("gates skipped: cannot decode generated image")
+                else:
+                    try:
+                        import cv2
+
+                        image_bgr = cv2.cvtColor(image_rgb,
+                                                 cv2.COLOR_RGB2BGR)
+                        keypoints = _detect_body_keypoints(p, image_bgr)
+                    except Exception as exc:
+                        _log(f"pose detection for gates failed ({exc})")
+                _run_body_gate(p, pp, precomputed=(image_bgr, keypoints))
+                _run_navel_gate(p, pp, image_rgb=image_rgb,
+                                image_bgr=image_bgr, keypoints=keypoints)
             if plan["mode"] not in ("swap", "blended-swap"):
                 # No swap ran: the ControlNet reference path forms
-                # identity during diffusion, and outfit-only runs have no
+                # identity during diffusion, and faceless runs have no
                 # face reference at all. Record n/a explicitly instead of
                 # staying silent (F7).
-                why = ("no face reference" if plan["mode"] == "outfit-only"
+                why = ("no face reference"
+                       if plan["mode"] in ("outfit-only", "torso-only",
+                                           "outfit+torso")
                        else "controlnet")
                 p.extra_generation_params.setdefault(
                     "FaceConsistency similarity before", f"n/a ({why})")
                 p.extra_generation_params.setdefault(
                     "FaceConsistency similarity after", f"n/a ({why})")
+                if plan["mode"] != "disabled":
+                    _maybe_run_navel_detailer(p, pp, keypoints=keypoints)
                 return
             try:
                 from face_consistency import blend as blend_mod
@@ -915,6 +1384,9 @@ if _FORGE_AVAILABLE:
             except Exception as exc:
                 p.extra_generation_params["FaceConsistency error"] = str(exc)
                 _log(f"{plan['mode']} FAILED: {exc}")
+            # Navel detailer runs last, on the final pixels (after any
+            # face swap), in every non-disabled mode.
+            _maybe_run_navel_detailer(p, pp, keypoints=keypoints)
 
         def postprocess(self, p, processed, *args):
             plan = getattr(p, "_ffc_plan", None)
@@ -971,6 +1443,47 @@ if _FORGE_AVAILABLE:
             ffc_settings.DEFAULT_OUTFIT_STRENGTH,
             "Outfit / object reference default strength (0 = off)",
             gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_TORSO_REF_DIR, shared.OptionInfo(
+            ffc_settings.DEFAULT_TORSO_REF_DIR,
+            "Torso reference folder: photos/crops of the person's torso "
+            "(chest + waist). A square torso crop of the first readable "
+            "image conditions the torso IP-Adapter unit.",
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_TORSO_STRENGTH, shared.OptionInfo(
+            ffc_settings.DEFAULT_TORSO_STRENGTH,
+            "Torso reference default strength (0 = off). 0.45 anchors the "
+            "torso without letting the adapter dominate the prompt.",
+            gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_TORSO_DEPTH_WEIGHT, shared.OptionInfo(
+            ffc_settings.DEFAULT_TORSO_DEPTH_WEIGHT,
+            "Torso depth-lock weight (0 = off). Needs a depth ControlNet "
+            "model in models/ControlNet; geometrically anchors breast "
+            "volume and waist curve.",
+            gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.05},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_TORSO_DEPTH_PREPROCESSOR, shared.OptionInfo(
+            ffc_settings.DEFAULT_TORSO_DEPTH_PREPROCESSOR,
+            "Depth preprocessor for the torso depth-lock unit",
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_NAVEL_DETAILER, shared.OptionInfo(
+            ffc_settings.DEFAULT_NAVEL_DETAILER,
+            "Navel detailer pass: re-render the navel ROI at 3x with a "
+            "low-denoise img2img pass after generation (experimental; "
+            "stabilizes navel position and rendering)",
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_NAVEL_GATE, shared.OptionInfo(
+            ffc_settings.OPT_NAVEL_GATE,
+            "Navel-position gate: template-match the navel in the waist "
+            "ROI against the reference navel crop ('warn' = infotext "
+            "warning; there is no reject mode by design)",
+            gr.Dropdown, {"choices": list(ffc_settings.NAVEL_GATE_MODES)},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_NAVEL_TEMPLATE, shared.OptionInfo(
+            ffc_settings.DEFAULT_NAVEL_TEMPLATE,
+            "Path to a small reference crop of the person's navel "
+            "(used by the navel gate template match)",
             section=section))
         shared.opts.add_option(ffc_settings.OPT_BODY_GATE, shared.OptionInfo(
             ffc_settings.DEFAULT_BODY_GATE,

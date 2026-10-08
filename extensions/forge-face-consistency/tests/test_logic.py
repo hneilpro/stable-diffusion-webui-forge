@@ -229,3 +229,15 @@ def test_detect_family_xl_in_filename():
     # "sd" prefix (live 2026-10-08: epicrealismXL misdetected as "other").
     assert logic.detect_family(
         checkpoint_hint="epicrealismXL_vxviiCrystalclear.safetensors") == "sdxl"
+
+
+def test_find_depth_model_picks_depth_variant():
+    names = ["None", "control_v11f1p_sd15_depth [abc123]",
+             "ip-adapter_sdxl [b]"]
+    assert logic.find_depth_model(names) == \
+        "control_v11f1p_sd15_depth [abc123]"
+
+
+def test_find_depth_model_none_when_absent():
+    assert logic.find_depth_model(["None", "ip-adapter_sdxl [b]"]) is None
+    assert logic.find_depth_model([]) is None
