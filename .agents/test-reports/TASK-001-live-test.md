@@ -1,0 +1,83 @@
+# Test report — TASK-001 live round 1 — 2026-10-07
+
+- Branch: feat/forge-consistent-character
+- Scope: first live run of extensions/forge-face-consistency on the owner's
+  RTX 4090 Forge via a pasted tunnel URL (URL not recorded, per repo rules).
+- Tunnel generation outputs: ~/workspace/forge-live-test/out/ (agent VM).
+
+## Server probe
+
+- Forge reachable; checkpoints: epicrealismXL_vxviiCrystalclear (SDXL,
+  loaded) and iniverseMixSFWNSFW_f1dRealnsfwGuofengV2 (Flux).
+- GET /sdapi/v1/script-info lists "forge face consistency" as alwayson for
+  both txt2img and img2img, args [enabled=false, ref=null, refs_dir=null,
+  strength=0.85, restore=true] — the extension loads in real Forge.
+- ControlNet models include ip-adapter-faceid-plusv2_sdxl and the InstantID
+  pair — the below-max SDXL reference path has an adapter available.
+
+## Live generations (512x768, 20 steps, DPM++ 2M Karras, CFG 6, seed 424242)
+
+Prompt: head-and-shoulders studio portrait of a woman. Reference: the
+canonical character face (agent-side file, not in this repo).
+
+| run | args | result |
+| --- | --- | --- |
+| a_off_noscript | no alwayson script | sha256 cd19d50d1250adbf… |
+| b_off_disabled | script present, enabled=false | sha256 cd19d50d1250adbf… — byte-identical to A |
+| c_sdxl_swap_max | enabled, strength 1.0 | pixel-identical to A; infotext "FaceConsistency error: tuple index out of range", mode=swap |
+| g_sdxl_strength0 | enabled, strength 0.0 | pixel-identical to A |
+| e_sdxl_ref_vj | enabled, strength 0.85, character ref | pixel-identical to A and to F; infotext mode=disabled |
+| f_sdxl_ref_wrong | enabled, strength 0.85, different-person ref | pixel-identical to A and to E |
+
+Pixel comparison (PIL, decoded pixels, not file bytes): every run's
+mean |diff| vs A = 0.000. Independent ArcFace verify (agent-side
+InsightFace) of C vs the reference: 0.049 — identical to A's 0.049. The
+swap never ran; no ControlNet injection ever happened.
+
+## Root cause (confirmed by the owner's PC console)
+
+Owner-pasted traceback: before_process -> representative_rgb_for_unit ->
+_ref_to_rgb, line 117 `if arr.shape[-1] == 4:` IndexError: tuple index
+out of range. The API delivers image script args as base64 strings; the
+script assumed the WebUI's numpy array. np.asarray(str) is a 0-d array,
+so shape[-1] raises. Reproduced exactly in isolation on this VM.
+before_process crashed before writing mode/params (hence mode=disabled
+for E/F), and for the swap run _ref_to_bgr died the same way inside
+postprocess_image, where the existing try/except recorded it in the
+infotext. The API path was therefore exercised but ref handling was not
+API-safe — an F6 sub-criterion found live, exactly as the gate intended.
+
+## What passed live
+
+- Extension loads in Forge; accordion script registered for txt2img and
+  img2img (script-info). UI accordion rendering itself not visually
+  inspected (API-only session).
+- Enable OFF is byte-identical to no-script on a real SDXL generation.
+
+## Fix (repair round 4, this VM; not yet on the owner's PC)
+
+- scripts/forge_face_consistency.py: _ref_to_rgb/_ref_to_bgr now accept
+  numpy, PIL, dict, bytes, and strings (base64 / data-URI / file path)
+  via _decode_ref_string; undecodable input returns None instead of
+  raising; ndim/size validated before shape indexing.
+  representative_rgb_for_unit and the swap ref path inherit this.
+- tests/test_script_shell.py: +7 tests (base64/data-URI/path decode,
+  garbage -> None not crash, BGR channel flip, representative from a
+  string ref, before_process with a string ref injecting a ControlNet
+  unit with a real ndarray, string ref at max setting the swap ref).
+- Offline evidence: pytest 42 passed (35 pre-existing + 7 new), exit 0;
+  py_compile 10/10 exit 0 (venv: pytest 9.1.1, numpy 2.5.3, pillow 12.3.0).
+- Engine de-risk: the extension's own FaceSwapEngine, run agent-side on
+  live output A, moved ArcFace similarity 0.049 -> 0.921 (GFPGAN restore),
+  target out/local_engine_swap_check.png in the agent live-test dir. The
+  swap engine works; only the ref decode blocked it in Forge.
+
+## Still unverified (F6 remainder)
+
+- SDXL strength=1.0 swap similarity >= 0.55 in Forge (after the owner's
+  PC pulls the fix and Forge restarts).
+- SDXL below-max ControlNet injection pixel effect (VJ ref vs wrong ref
+  vs strength 0, same seed) in Forge.
+- Flux strength=1.0 swap similarity >= 0.55.
+- Arg order via alwayson_scripts is confirmed accepted (script-info +
+  runs executed), but the enabled-path API run needs the retest above.

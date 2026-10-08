@@ -90,33 +90,66 @@ def _available_adapters():
         return None, []
 
 
-def _ref_to_bgr(ref_image):
-    """UI image (RGB numpy / PIL) -> BGR numpy, or None."""
+def _decode_ref_string(value):
+    """Reference image arriving as a string -> RGB numpy, or None.
+
+    The WebUI passes a numpy array, but the API delivers image script
+    args as base64 strings (optionally data-URI prefixed) — and a string
+    is also how a same-machine caller passes a file path. Handle all
+    three; never raise, since this runs inside someone else's
+    generation (live failure 2026-10-07: np.asarray(str) is a 0-d array
+    and shape[-1] died with "tuple index out of range").
+    """
+    text = value.decode("utf-8", "ignore") if isinstance(value, bytes) else value
+    text = text.strip()
+    if not text:
+        return None
+    if os.path.isfile(text):
+        return _load_rgb_from_path(text)
+    if text.startswith("data:"):
+        text = text.split(",", 1)[-1] if "," in text else ""
+    try:
+        import base64
+        import io
+
+        from PIL import Image
+
+        raw = base64.b64decode(text, validate=False)
+        with Image.open(io.BytesIO(raw)) as im:
+            return np.asarray(im.convert("RGB"))
+    except Exception:
+        return None
+
+
+def _ref_to_rgb(ref_image):
+    """UI/API reference (numpy / PIL / base64 / path) -> RGB numpy, or None."""
     if ref_image is None:
         return None
-    if hasattr(ref_image, "convert"):  # PIL
+    if isinstance(ref_image, dict):  # gradio image-editor style payload
+        return _ref_to_rgb(ref_image.get("image"))
+    if isinstance(ref_image, (str, bytes)):
+        arr = _decode_ref_string(ref_image)
+        if arr is None:
+            return None
+    elif hasattr(ref_image, "convert"):  # PIL
         arr = np.asarray(ref_image.convert("RGB"))
     else:
         arr = np.asarray(ref_image)
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
-    if arr.shape[-1] == 4:
-        arr = arr[..., :3]
-    return np.ascontiguousarray(arr[..., ::-1])  # RGB -> BGR
-
-
-def _ref_to_rgb(ref_image):
-    """UI image (RGB numpy / PIL) -> RGB numpy, or None."""
-    if ref_image is None:
+    if arr.ndim != 3 or arr.size == 0:
         return None
-    if hasattr(ref_image, "convert"):  # PIL
-        return np.asarray(ref_image.convert("RGB"))
-    arr = np.asarray(ref_image)
-    if arr.ndim == 2:
-        arr = np.stack([arr] * 3, axis=-1)
     if arr.shape[-1] == 4:
         arr = arr[..., :3]
     return np.ascontiguousarray(arr)
+
+
+def _ref_to_bgr(ref_image):
+    """UI/API reference -> BGR numpy, or None."""
+    rgb = _ref_to_rgb(ref_image)
+    if rgb is None:
+        return None
+    return np.ascontiguousarray(rgb[..., ::-1])  # RGB -> BGR
 
 
 def _load_rgb_from_path(path):

@@ -9,3 +9,9 @@ Verified, reusable facts for the builder role in this repo. Concise sections, ne
 - Status: active
 - Finding: The suite needs the dev DB running; without it 6 tests report unverified, not failures.
 -->
+
+## 2026-10-07 — Forge API image script args arrive as base64 strings
+- Scope: extensions/forge-face-consistency (any Forge script shell)
+- Evidence: owner-4090 traceback (before_process -> _ref_to_rgb line 117 IndexError) + live pixel-identical enabled runs; .agents/test-reports/TASK-001-live-test.md
+- Status: active
+- Finding: the WebUI passes numpy arrays to script UI args, but the API passes image args as base64 strings (data-URI or path also possible). Script shells must decode all of these and return None on garbage instead of indexing array shape on np.asarray(str), which is a 0-d array.

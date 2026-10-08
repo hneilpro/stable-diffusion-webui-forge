@@ -23,6 +23,16 @@ Next: <owner/role + exact next action, or "none">
 ---
 
 <!-- Post new entries below this line, newest first. -->
+## 2026-10-07 — builder — TASK-001 — repair round 4 committed + pushed on owner go
+Owner approved commit + push of the API string-ref fix (script + 7 tests + live test report + handoff). Owner pulls on the PC and restarts Forge, then relays readiness (fresh tunnel URL if cloudflared restarted).
+Evidence: .agents/test-reports/TASK-001-live-test.md, .agents/handoffs/TASK-001-repair-4-handoff.md
+Next: owner pulls + restarts Forge; builder re-runs the live matrix (SDXL swap >= 0.55, below-max injection pixel diff, Flux swap); critic re-scores F6 only.
+
+## 2026-10-07 — builder — TASK-001 — live round 1 done: loads + OFF identical; API string-ref bug found and fixed locally
+First owner-4090 live run: extension loads (script-info, txt2img+img2img), enable OFF byte-identical to no-script (same sha256), but swap and below-max injection never ran — the API sends the reference as a base64 string and _ref_to_rgb died on shape[-1] of a 0-d array (owner's PC traceback confirms line 117; E/F pixel-identical to the OFF baseline, swap image ArcFace 0.049 = baseline). Repair round 4: ref conversion accepts base64/data-URI/path/dict and returns None instead of raising; 42 offline tests pass (7 new); the extension engine run agent-side on a live output scores 0.049 -> 0.921, so the swap core works. Not committed/pushed yet.
+Evidence: .agents/test-reports/TASK-001-live-test.md, .agents/handoffs/TASK-001-repair-4-handoff.md
+Next: owner go to commit+push, then owner pulls + restarts Forge; builder re-runs the live matrix (SDXL swap, injection pixel diff, Flux swap); critic re-scores F6 only.
+
 ## 2026-10-07 — builder — TASK-001 — repair round 3 done, ready for critic re-review
 Critic minors fixed: N1 .gitignore now ignores the extension's __pycache__/*.pyc after the negation (git add -n = exactly 11 real files, 0 bytecode, re-checked after pytest regenerated caches; core diff = .gitignore only); N2 representative picker now tries every folder file in sorted order until one decodes (new logic.list_ref_candidates; skipped files named in the source note; all-corrupt folder keeps the loud downgrade). Fresh evidence: py_compile 10/10 exit 0, pytest 35 passed (32 pre-existing + 3 new), IMPORT_PURITY_OK, DISABLED_NOOP_OK. F6 live 4090 proof still unverified and unwaived — task is not done.
 Evidence: .agents/handoffs/TASK-001-repair-3-handoff.md, .agents/test-reports/TASK-001-offline-test.md (repair round 3 addendum)

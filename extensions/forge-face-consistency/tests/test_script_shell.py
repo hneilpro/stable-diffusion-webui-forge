@@ -355,6 +355,87 @@ def test_representative_all_corrupt_folder_returns_none(monkeypatch, tmp_path):
     assert note == "no readable image in reference folder"
 
 
+# --- API string reference (live failure 2026-10-07) -------------------------
+#
+# The WebUI hands the script a numpy array, but the API delivers image
+# script args as base64 strings. The first live run died on both paths
+# with "tuple index out of range" (np.asarray(str) is a 0-d array) and
+# silently generated with no swap and no injection.
+
+
+def _b64_png(rgb=(10, 20, 30), size=(6, 5)):
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, rgb).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_ref_to_rgb_decodes_base64_string():
+    rgb = mod._ref_to_rgb(_b64_png())
+    assert rgb is not None
+    assert rgb.shape == (5, 6, 3)
+    assert tuple(rgb[0, 0]) == (10, 20, 30)
+
+
+def test_ref_to_rgb_decodes_data_uri_and_path(tmp_path):
+    b64 = _b64_png(rgb=(1, 2, 3))
+    rgb = mod._ref_to_rgb("data:image/png;base64," + b64)
+    assert rgb is not None and tuple(rgb[0, 0]) == (1, 2, 3)
+    path = tmp_path / "ref.png"
+    import base64
+
+    path.write_bytes(base64.b64decode(b64))
+    rgb = mod._ref_to_rgb(str(path))
+    assert rgb is not None and tuple(rgb[0, 0]) == (1, 2, 3)
+
+
+def test_ref_to_rgb_undecodable_string_returns_none_not_crash():
+    assert mod._ref_to_rgb("not an image at all") is None
+    assert mod._ref_to_rgb("") is None
+    assert mod._ref_to_bgr("not an image at all") is None
+
+
+def test_ref_to_bgr_flips_channels_from_string():
+    bgr = mod._ref_to_bgr(_b64_png(rgb=(10, 20, 30)))
+    assert bgr is not None and tuple(bgr[0, 0]) == (30, 20, 10)
+
+
+def test_representative_from_base64_single_image():
+    rgb, note = mod.representative_rgb_for_unit(_b64_png(), "")
+    assert rgb is not None and rgb.shape == (5, 6, 3)
+    assert note == "single image"
+
+
+def test_before_process_string_ref_injects_controlnet_unit(monkeypatch):
+    captured = {}
+
+    def fake_build(pre, model_name, weight, ref_rgb):
+        captured.update(image=ref_rgb, weight=weight)
+        return SimpleNamespace(enabled=True, image=ref_rgb)
+
+    monkeypatch.setattr(mod, "_build_controlnet_unit", fake_build)
+    _patch_adapter(monkeypatch)
+    args = [SimpleNamespace(enabled=False)]
+    p = _fake_p(sd_model=_sdxl_model(), scripts=_cn_runner(args, [False]),
+                script_args=args)
+    _script().before_process(p, True, _b64_png(), "", 0.85, True)
+    assert p._ffc_plan["mode"] == "faceid"
+    assert isinstance(captured["image"], np.ndarray)
+    assert captured["image"].shape == (5, 6, 3)
+
+
+def test_before_process_string_ref_at_max_sets_swap_ref():
+    p = _fake_p(sd_model=_sdxl_model())
+    _script().before_process(p, True, _b64_png(), "", 1.0, True)
+    assert p._ffc_plan["mode"] == "swap"
+    ref_bgr = p._ffc_plan["ref_bgr"]
+    assert isinstance(ref_bgr, np.ndarray) and ref_bgr.shape == (5, 6, 3)
+
+
 def test_template_cache_key_separates_sources():
     from face_consistency.swap_engine import FaceSwapEngine
 

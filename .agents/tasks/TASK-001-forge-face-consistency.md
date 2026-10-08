@@ -1,6 +1,6 @@
 # TASK-001 — Forge face consistency: reference strength with max = face swap
 
-- Status: in progress (build + repair rounds 2–3 done; critic re-review of N1/N2 and live GPU checks (F6) pending)
+- Status: in progress (repair round 4 done locally; live round 1 proved load + OFF byte-identical and found the API string-ref crash — fix needs owner push/pull + Forge restart before the F6 retest)
 - Owner role: builder (Tori)
 - Critic: unassigned (separate pass after build)
 - Branch: feat/forge-consistent-character
@@ -58,3 +58,4 @@ Alternatives considered:
 ## Result
 Repair round 2 (2026-10-07): F1 (folder-only ControlNet unit image), F2 (extension git-ignored), F3 (shipped injection/no-op/downgrade tests), F4 (verify threshold wired to infotext/log warning), F5 (engine + template cached per run), F7 (README infotext claim scoped), F8 (blend-skip recorded) fixed; 32 offline tests pass. F6 live criteria still unverified — pending owner-4090 tunnel run (or explicit offline-only waiver). Detail: .agents/handoffs/TASK-001-repair-2-handoff.md, .agents/test-reports/TASK-001-offline-test.md.
 Repair round 3 (2026-10-07): critic minors N1 (.gitignore negation re-included 13 .pyc files in git add) and N2 (representative picker tried only the first folder file) fixed; 35 offline tests pass. F6 unchanged. Detail: .agents/handoffs/TASK-001-repair-3-handoff.md.
+Live round 1 + repair round 4 (2026-10-07): on the owner's 4090 the extension loads in Forge (txt2img/img2img) and enable OFF is byte-identical to no-script, but swap and below-max injection never executed — the API delivers the reference image as a base64 string and _ref_to_rgb crashed on shape[-1] of the resulting 0-d array (owner traceback, line 117; all enabled runs pixel-identical to the OFF baseline, swap-run similarity 0.049 = baseline). Fixed: ref conversion accepts base64/data-URI/path/dict and returns None instead of raising; 42 offline tests pass; the extension engine run agent-side on a live output scores 0.049 -> 0.921. Uncommitted. Detail: .agents/test-reports/TASK-001-live-test.md, .agents/handoffs/TASK-001-repair-4-handoff.md. Remaining F6: SDXL/Flux swap and injection pixel effect on the retest after the fix reaches the PC.
