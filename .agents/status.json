@@ -1,1 +1,19 @@
-{"blockers":["F6 remainder: below-max injection (round-5 self-report + pixel diff) and Flux swap - retest round 3 needs owner PC pull of repair round 5 + Forge restart + tunnel URL; Flux gens additionally need clip_l/t5xxl/ae attached via forge_additional_modules","TASK-002 live check unverified: API save-by-default + GFPGAN ONNX restore need owner PC run after pull + Forge restart + tunnel URL"],"branch":"feat/forge-consistent-character","current_task":"TASK-002","last_board_entry":"2026-10-08 builder committed+pushed on owner go: repair round 6 (tuple script_args) + TASK-002 (API save-by-default, GFPGAN docs); live checks unverified until owner PC pull + restart + tunnel URL","phase":"test","repair_round":6,"roles":{"builder":"Tori","critic":"Tori (independent critic pass)"},"task_001_status":"repair round 6 committed+pushed 2026-10-08 on owner go (script_args tuple fix, 45 tests); F6 retest still pending owner PC","updated":"2026-10-08"}
+{
+  "blockers": [
+    "F6 remainder: below-max injection (round-5 self-report + pixel diff) and Flux swap - retest round 3 needs owner PC pull of repair round 5 + Forge restart + tunnel URL; Flux gens additionally need clip_l/t5xxl/ae attached via forge_additional_modules",
+    "TASK-002 live check unverified: API save-by-default + GFPGAN ONNX restore need owner PC run after pull + Forge restart + tunnel URL",
+    "TASK-003 live check unverified: /sdapi/v1/console-log endpoints + Console tab + real error surfacing need owner PC run after pull + Forge restart + tunnel URL"
+  ],
+  "branch": "feat/forge-consistent-character",
+  "current_task": "TASK-002",
+  "last_board_entry": "2026-10-08 Meta committed+pushed on owner go: TASK-003 console capture over API+UI (critic-approved, offline tests 24/24); live checks unverified until owner PC pull + restart + tunnel URL",
+  "phase": "test",
+  "repair_round": 6,
+  "roles": {
+    "builder": "Tori",
+    "critic": "Tori (independent critic pass)"
+  },
+  "task_001_status": "repair round 6 committed+pushed 2026-10-08 on owner go (script_args tuple fix, 45 tests); F6 retest still pending owner PC",
+  "updated": "2026-10-08",
+  "task_003_status": "critic-approved (self-review), pushed 2026-10-08 on owner go; 24/24 offline tests green; live HTTP + Console tab + real-error surfacing unverified until owner PC pull + restart + tunnel URL"
+}

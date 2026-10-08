@@ -268,6 +268,29 @@ def create_override_settings_dropdown(tabname, row):
     return dropdown
 
 
+def console_log_text():
+    """Render the in-process console buffer for the Console tab (newest first)."""
+    try:
+        from modules import console_capture
+
+        _, entries = console_capture.capture.get(limit=500)
+        lines = [e["text"] for e in reversed(entries)]
+        return "\n".join(lines) if lines else "(console buffer is empty)"
+    except Exception as e:
+        return f"(could not read console buffer: {e})"
+
+
+def console_log_clear():
+    """Clear the in-process console buffer (Console tab button)."""
+    try:
+        from modules import console_capture
+
+        console_capture.capture.clear()
+    except Exception:
+        pass
+    return "(console buffer cleared)"
+
+
 def create_ui():
     import modules.img2img
     import modules.txt2img
@@ -947,6 +970,26 @@ def create_ui():
             outputs=[html, generation_info, html2],
         )
 
+    with gr.Blocks(analytics_enabled=False) as console_interface:
+        gr.Markdown("In-process console capture (stdout/stderr/logging). Newest lines first. Also available over the API: `GET /sdapi/v1/console-log` and `GET /sdapi/v1/console-log/exceptions`.")
+        with gr.Row():
+            console_refresh = gr.Button(value="Refresh", variant="secondary", elem_id="console_refresh")
+            console_clear = gr.Button(value="Clear buffer", variant="stop", elem_id="console_clear")
+        console_log = gr.Textbox(label="Console log", lines=40, max_lines=40, interactive=False, elem_id="console_log", show_copy_button=True)
+
+        console_refresh.click(
+            fn=console_log_text,
+            inputs=[],
+            outputs=[console_log],
+            show_progress=False,
+        )
+        console_clear.click(
+            fn=console_log_clear,
+            inputs=[],
+            outputs=[console_log],
+            show_progress=False,
+        )
+
     modelmerger_ui = ui_checkpoint_merger.UiCheckpointMerger()
 
     loadsave = ui_loadsave.UiLoadsave(cmd_opts.ui_config_file)
@@ -961,6 +1004,7 @@ def create_ui():
         (extras_interface, "Extras", "extras"),
         (pnginfo_interface, "PNG Info", "pnginfo"),
         (modelmerger_ui.blocks, "Checkpoint Merger", "modelmerger"),
+        (console_interface, "Console", "console"),
     ]
 
     interfaces += script_callbacks.ui_tabs_callback()
@@ -1007,6 +1051,15 @@ def create_ui():
         footer = shared.html("footer.html")
         footer = footer.format(versions=versions_html(), api_docs="/docs" if shared.cmd_opts.api else "https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/API")
         gr.HTML(footer, elem_id="footer")
+
+        # Keep the Console tab fresh: poll the in-process buffer every 2s.
+        demo.load(
+            fn=console_log_text,
+            inputs=[],
+            outputs=[console_log],
+            every=2,
+            show_progress=False,
+        )
 
         settings.add_functionality(demo)
 

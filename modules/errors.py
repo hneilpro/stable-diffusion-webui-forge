@@ -1,3 +1,4 @@
+import datetime
 import sys
 import textwrap
 import traceback
@@ -21,18 +22,39 @@ def get_exceptions():
         return str(e)
 
 
+MAX_EXCEPTION_RECORDS = 50
+
+
+def record_exception_info(exc_type, exc_value, tb):
+    """Record a structured exception entry from an explicit exception triple.
+
+    Safe to call from an API error handler where sys.exc_info() may not be set.
+    """
+    if exc_value is None:
+        return
+
+    record = format_exception(exc_value, tb)
+    try:
+        record["type"] = exc_type.__name__ if exc_type is not None else type(exc_value).__name__
+    except Exception:
+        record["type"] = type(exc_value).__name__
+    record["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    if exception_records and exception_records[-1].get("exception") == record["exception"]:
+        return
+
+    exception_records.append(record)
+
+    while len(exception_records) > MAX_EXCEPTION_RECORDS:
+        exception_records.pop(0)
+
+
 def record_exception():
-    _, e, tb = sys.exc_info()
+    exc_type, e, tb = sys.exc_info()
     if e is None:
         return
 
-    if exception_records and exception_records[-1] == e:
-        return
-
-    exception_records.append(format_exception(e, tb))
-
-    if len(exception_records) > 5:
-        exception_records.pop(0)
+    record_exception_info(exc_type, e, tb)
 
 
 def report(message: str, *, exc_info: bool = False) -> None:

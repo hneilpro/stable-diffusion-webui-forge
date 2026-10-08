@@ -82,3 +82,30 @@ Next: critic review; live SDXL+Flux proof still needs owner 4090 + tunnel URL (u
 Cloned feat/forge-consistent-character (empty branch at main b9a772f). Research done: Forge natively supports IP-Adapter FaceID/InstantID via ControlNet; swap (inswapper) is the model-agnostic route for SDXL+Flux. Plan: extension under extensions/forge-face-consistency, strength<max = reference, max = full swap + restore, ArcFace verify in infotext.
 Evidence: .agents/research/forge-face-consistency-research.md, .agents/tasks/TASK-001-forge-face-consistency.md
 Next: owner OK on plan, then Build phase.
+
+## 2026-10-08 — Meta (builder) — TASK-003 — build + offline tests done, ready for critic review
+New: in-process console capture (modules/console_capture.py, stdlib-only): root-logging handler, sys.stdout/stderr tee proxy, sys/threading excepthooks, bounded ring buffer (2000 lines / 512KB) with cursor pagination. Installed in webui.py right after imports (before initialize_forge), kill switch --disable-console-log-capture. API: GET /sdapi/v1/console-log?limit&since and GET /sdapi/v1/console-log/exceptions (both via add_api_route, same auth as all routes). errors.py: structured records now have type+timestamp, cap 5->50, dedupe fixed; webui.py::_handle_exception (the live handler) records into it. UI: "Console" tab with Refresh/Clear + 2s auto-poll, monospace CSS. Research correction mid-build: api.py::handle_exception is dead code (api_middleware call commented out) — left untouched. Evidence: 21/21 pytest pass, py_compile 8/8, AST-exec handler verification, .agents/test-reports/TASK-003-offline-test.md. Unverified: live HTTP + UI tab + real error surfacing — needs owner PC pull + Forge restart + tunnel URL.
+Next: critic review (role switch posted below); owner live check after that.
+
+## 2026-10-08 — Meta — role switch: builder -> critic (self-review, not independent) for TASK-003
+Per role rules: I built TASK-003, so this critic pass is graded as self-review, not independent. Read-only on the change from here; findings go back to the builder (me, next pass) or to the owner.
+
+## 2026-10-08 — critic (self-review) — TASK-003 — verdict: needs changes (1 blocking)
+F1 BLOCKING: install() adds a root logging handler unconditionally; in the default no---loglevel config the webui process relies on logging's last-resort handler for console output, which stops firing once any handler exists — so logging.* output would vanish from the real console (reproduced in isolation). Fix: when root has no other handlers, attach a plain StreamHandler to pre-proxy stderr; remove on uninstall; add regression test. F2 minor: _TeeStream _partial race (cosmetic). F3 minor: HTTPExceptions (401s) pollute the 50-slot structured store — suggest skipping. Verified independently: gradio 4.40.0 wheel has show_copy_button + every param (UI kwargs valid). Evidence: .agents/reviews/TASK-003-critic-review.md.
+Next: builder repairs F1 (+test), optionally F2/F3; critic re-scores.
+
+## 2026-10-08 — Meta — role switch: critic -> builder for TASK-003 repair round 1
+Repairing F1 (blocking: console-preserving fallback handler), F2 (tee partial-line lock), F3 (skip HTTPException in structured store). Then re-test + critic re-score.
+
+## 2026-10-08 — Meta (builder) — TASK-003 — repair round 1 done, ready for critic re-score
+F1 fixed: install() attaches a console-preserving StreamHandler (pre-proxy stderr, removed on uninstall) when root has no other handlers; skipped when --loglevel's handler exists. Regression test fails on pre-fix code (verified via hunk revert) and passes now. F2 fixed: _partial lock in write()/flush(). F3 fixed: HTTPException skipped in structured store (isinstance). Suite 24/24 green, py_compile clean. Critic opinion autoscroll declined (newest-first render makes it moot).
+Evidence: .agents/test-reports/TASK-003-offline-test.md (repair round 1 addendum)
+Next: critic re-scores F1-F3 only; owner live checks (HTTP + UI tab + real error) still need his PC.
+
+## 2026-10-08 — Meta — role switch: builder -> critic (self-review) for TASK-003 re-score
+Re-scoring F1-F3 only against fresh evidence.
+
+## 2026-10-08 — critic (self-review) — TASK-003 — re-review verdict: approve with notes
+F1/F2/F3 all fixed with fresh evidence: read final install()/uninstall(), 24/24 pytest green in this pass, regression test proven to fail pre-fix, py_compile clean. Notes: live HTTP + UI tab + real-error surfacing still unverified (owner PC); --disable flag parse unverified here; C-extension writes bypass by design. No secrets in diff. Not pushing — owner reviews at push time.
+Evidence: .agents/reviews/TASK-003-critic-review.md (re-review section)
+Next: owner pulls feat/forge-consistent-character, restarts Forge, pastes tunnel URL; then live checks.

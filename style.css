@@ -1703,3 +1703,8 @@ body.resizing .resize-handle {
 .forge_space_btn{
     min-width: 0 !important;
 }
+#console_log textarea{
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12px;
+    white-space: pre;
+}

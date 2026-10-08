@@ -338,3 +338,17 @@ class ExtensionItem(BaseModel):
     version: str = Field(title="Version", description="Extension Version")
     commit_date: int = Field(title="Commit Date", description="Extension Repository Commit Date")
     enabled: bool = Field(title="Enabled", description="Flag specifying whether this extension is enabled")
+
+class ConsoleLogLine(BaseModel):
+    id: int = Field(title="ID", description="Monotonic line ID; pass back as 'since' for incremental polling")
+    ts: float = Field(title="Timestamp", description="Unix epoch seconds when the line was captured")
+    stream: str = Field(title="Stream", description="Origin: 'stdout', 'stderr', or 'log'")
+    level: str = Field(title="Level", description="Log level: e.g. INFO, WARNING, ERROR")
+    text: str = Field(title="Text", description="The console line text")
+
+class ConsoleLogResponse(BaseModel):
+    cursor: int = Field(title="Cursor", description="Newest line ID in this response; use as 'since' next poll")
+    lines: list[ConsoleLogLine] = Field(title="Lines", description="Console lines, oldest first")
+
+class ConsoleExceptionsResponse(BaseModel):
+    exceptions: list[dict] = Field(title="Exceptions", description="Recent structured exceptions: type, exception message, traceback frames, timestamp; newest first")

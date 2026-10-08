@@ -4,6 +4,7 @@ import os
 import time
 
 from fastapi import Request
+from fastapi.exceptions import HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
@@ -13,6 +14,16 @@ from modules import initialize
 from threading import Thread
 from modules_forge.initialization import initialize_forge
 from modules_forge import main_thread
+
+
+# Install the in-process console capture as early as possible so that startup
+# errors are captured too. Exposed over GET /sdapi/v1/console-log and the Console tab.
+from modules.shared_cmd_options import cmd_opts as _early_cmd_opts
+
+if not _early_cmd_opts.disable_console_log_capture:
+    from modules import console_capture as _console_capture
+
+    _console_capture.install()
 
 
 startup_timer = timer.startup_timer
@@ -28,6 +39,15 @@ initialize.initialize()
 
 
 def _handle_exception(request: Request, e: Exception):
+    # Feed the structured exception store so tracebacks are retrievable over
+    # GET /sdapi/v1/console-log/exceptions. Skip known HTTPExceptions (e.g. 401s).
+    if not isinstance(e, HTTPException):
+        try:
+            from modules import errors as _errors
+
+            _errors.record_exception_info(type(e), e, e.__traceback__)
+        except Exception:
+            pass
     error_information = vars(e)
     content = {
         "error": type(e).__name__,

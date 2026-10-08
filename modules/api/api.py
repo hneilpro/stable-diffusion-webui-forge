@@ -242,6 +242,8 @@ class Api:
         self.add_api_route("/sdapi/v1/scripts", self.get_scripts_list, methods=["GET"], response_model=models.ScriptsList)
         self.add_api_route("/sdapi/v1/script-info", self.get_script_info, methods=["GET"], response_model=list[models.ScriptInfo])
         self.add_api_route("/sdapi/v1/extensions", self.get_extensions_list, methods=["GET"], response_model=list[models.ExtensionItem])
+        self.add_api_route("/sdapi/v1/console-log", self.console_log_api, methods=["GET"], response_model=models.ConsoleLogResponse)
+        self.add_api_route("/sdapi/v1/console-log/exceptions", self.console_log_exceptions_api, methods=["GET"], response_model=models.ConsoleExceptionsResponse)
 
         if shared.cmd_opts.api_server_stop:
             self.add_api_route("/sdapi/v1/server-kill", self.kill_webui, methods=["POST"])
@@ -853,6 +855,19 @@ class Api:
                     "enabled":ext.enabled
                 })
         return ext_list
+
+    def console_log_api(self, limit: int = 200, since: int = 0):
+        """Return recent console lines. Poll with ``since=<cursor>`` for incremental updates."""
+        from modules import console_capture
+        cursor, entries = console_capture.capture.get(since=since, limit=limit)
+        return models.ConsoleLogResponse(
+            cursor=cursor,
+            lines=[models.ConsoleLogLine(**entry) for entry in entries],
+        )
+
+    def console_log_exceptions_api(self):
+        """Return structured recent exceptions (type, message, traceback, timestamp)."""
+        return models.ConsoleExceptionsResponse(exceptions=errors.get_exceptions())
 
     def launch(self, server_name, port, root_path):
         self.app.include_router(self.router)
