@@ -136,6 +136,19 @@ def test_injection_accepts_dict_units():
     assert p.script_args[1] is unit
 
 
+def test_injection_rewrites_tuple_script_args():
+    # Live round 3 (2026-10-08): Forge hands p.script_args over as an
+    # immutable tuple; assigning into it raised "'tuple' object does not
+    # support item assignment" and the injection never happened.
+    unit = SimpleNamespace(enabled=True)
+    args = (SimpleNamespace(enabled=True), SimpleNamespace(enabled=False))
+    p = _fake_p(scripts=_cn_runner(args, [True, False]), script_args=args)
+    assert mod._inject_controlnet_unit(p, unit) is True
+    assert isinstance(p.script_args, list)
+    assert p.script_args[1] is unit
+    assert p.script_args[0].enabled is True
+
+
 def test_injection_all_busy_returns_false():
     unit = SimpleNamespace(enabled=True)
     args = [SimpleNamespace(enabled=True), SimpleNamespace(enabled=True)]

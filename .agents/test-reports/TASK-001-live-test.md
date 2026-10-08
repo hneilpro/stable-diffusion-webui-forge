@@ -111,6 +111,29 @@ family) are now written even on that path. +2 offline tests (build
 failure, family-probe failure -> recorded blended-swap downgrade);
 suite 44 passed, py_compile OK.
 
+---
+
+# Live round 3 — 2026-10-08 (after repair round 5, commit 6b72358)
+
+Outputs: ~/workspace/forge-live-test/out3/. The self-reporting works:
+the infotext now carries the exact exception.
+
+| run | result |
+| --- | --- |
+| a3_off | baseline; sha identical to round 2's baseline across restarts |
+| e3_ref_vj (0.85) | mode=blended-swap via the new loud downgrade; infotext "FaceConsistency error: 'tuple' object does not support item assignment"; extension-measured 0.039 -> 0.938, independent verify 0.902; 8.0% of pixels differ from baseline. Root cause found: Forge hands p.script_args as an immutable tuple and _inject_controlnet_unit assigned into it |
+| f3_ref_wrong (0.85) | same downgrade; 24.4% of pixels differ from baseline, 27.1% from e3 — the fallback is reference-dependent, as designed |
+| g3_strength0 | pixel-identical to baseline |
+| Flux (encoders attached via forge_additional_modules: clip_l, t5xxl_fp8, ae — accepted, stored as full paths) | flux_off hit a Cloudflare 524 on the tunnel during the first slow load; flux_swap then returned in 68 s but produced a pure black image (1,890-byte PNG; no face detectable, extension recorded "no face detected in target image"). Forge options were restored to SDXL + no modules afterwards |
+
+Repair round 6 (this VM): _inject_controlnet_unit converts
+p.script_args to a list before assigning (+1 tuple test; 45 tests
+pass). The ControlNet injection itself is still unproven until the
+retest. Flux black-frame is a generation-side issue (sampler/guidance
+fit for this distilled Flux fine-tune) to retry with different settings
+on the next run; the extension correctly recorded the failure instead
+of swapping nothing silently.
+
 ## F6 status after round 2
 
 - Loads (txt2img/img2img): PASS (round 1).

@@ -257,9 +257,13 @@ def _inject_controlnet_unit(p, unit):
     runner = getattr(p, "scripts", None)
     if runner is None:
         return False
-    script_args = getattr(p, "script_args", None)
-    if not script_args:
+    raw_args = getattr(p, "script_args", None)
+    if not raw_args:
         return False
+    # Forge hands p.script_args over as an immutable tuple (live round 3,
+    # 2026-10-08: "tuple object does not support item assignment").
+    # Rewrite it as a list — ScriptRunner slices it either way.
+    script_args = list(raw_args)
     for script in getattr(runner, "alwayson_scripts", []) or []:
         title = ""
         try:
