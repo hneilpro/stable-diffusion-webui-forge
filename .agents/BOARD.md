@@ -23,6 +23,21 @@ Next: <owner/role + exact next action, or "none">
 ---
 
 <!-- Post new entries below this line, newest first. -->
+## 2026-10-08 — builder — TASK-002 + TASK-001 repair 6 — committed + pushed on owner go
+Owner approved commit + push. Shipping together: repair round 6 (tuple script_args fix + tuple test + live round 3 report; suite 45 passed) and TASK-002 (API save_images default True for txt2img/img2img + GFPGAN two-file docs in extension README; critic approve-with-notes, self-review). Live criteria remain unverified until his PC run.
+Evidence: .agents/test-reports/TASK-002-offline-test.md, .agents/reviews/TASK-002-critic-review.md
+Next: owner pulls + restarts Forge, places gfpgan_1.4.onnx in models/insightface/; builder live checks (API save to outputs/, injection pixel diff, `restored by: gfpgan`) via fresh tunnel URL.
+
+## 2026-10-08 — critic — TASK-002 — verdict: approve with notes (self-review)
+Offline diff inspected firsthand: two save_images default flips + README GFPGAN section; URLs/paths byte-match code constants; no secrets; 45 tests green (per test report, re-verified commands in review pass). Not done: live criteria (API PNG in outputs/, `restored by: gfpgan` infotext) unverified until owner runs Forge on his PC — same gate style as TASK-001 F6.
+Evidence: .agents/reviews/TASK-002-critic-review.md, .agents/test-reports/TASK-002-offline-test.md
+Next: owner pulls (when pushed on his go) + restarts Forge + drops in gfpgan_1.4.onnx; builder runs the live checks via fresh tunnel URL.
+
+## 2026-10-08 — builder — TASK-002 — research + plan done, building on owner request
+Owner asked: GFPGAN steps for Forge + make API generations save to the output folder by default. Research found two distinct GFPGAN files (extension needs `gfpgan_1.4.onnx` in `models/insightface/`; Forge-native restore needs `GFPGANv1.4.pth` in `models/GFPGAN/`) and that API saving is gated solely by the `save_images` default in `modules/api/models.py`. Plan: flip both API defaults to True (explicit false still opts out) + exact GFPGAN steps in the extension README. Owner's message is the plan OK. TASK-001 repair round 6 stays uncommitted and untouched.
+Evidence: .agents/research/2026-10-08-gfpgan-and-api-save.md, .agents/tasks/TASK-002-api-save-and-gfpgan-docs.md
+Next: builder builds + offline-tests; live API-write check stays unverified until owner runs Forge; critic pass before any done claim.
+
 ## 2026-10-08 — builder — TASK-001 — live round 2: SDXL swap passes (0.938); repair round 5 pushed
 Round 2 on the owner's 4090 (commit 2dc41d3): SDXL max-strength swap passes in Forge — ArcFace 0.938 measured by the extension and independently (detail-graft restore, visible seam, no GFPGAN on the PC); alwayson API path passes with it. Below-max ControlNet injection still failed silently — an exception inside the then-unguarded setup block (unit build/inject) left the plan at mode=disabled with no infotext trace; repair round 5 wraps setup so failures print, land in the infotext, and downgrade loudly to blended swap (44 offline tests pass). Flux generation is blocked on the PC: Forge 500 "You do not have CLIP state dict!" — the owner's encoders (clip_l + t5xxl_fp8 in models/text_encoder/, ae in models/VAE/) exist but were not attached; retest will attach them via the forge_additional_modules option.
 Evidence: .agents/test-reports/TASK-001-live-test.md (round 2), .agents/handoffs/TASK-001-repair-5-handoff.md

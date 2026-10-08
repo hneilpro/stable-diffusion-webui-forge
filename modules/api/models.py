@@ -103,7 +103,9 @@ StableDiffusionTxt2ImgProcessingAPI = PydanticModelGenerator(
         {"key": "script_name", "type": str | None, "default": None},
         {"key": "script_args", "type": list, "default": []},
         {"key": "send_images", "type": bool, "default": True},
-        {"key": "save_images", "type": bool, "default": False},
+        # API generations save to the output folders by default (TASK-002);
+        # a request can still opt out with "save_images": false.
+        {"key": "save_images", "type": bool, "default": True},
         {"key": "alwayson_scripts", "type": dict, "default": {}},
         {"key": "force_task_id", "type": str | None, "default": None},
         {"key": "infotext", "type": str | None, "default": None},
@@ -122,7 +124,9 @@ StableDiffusionImg2ImgProcessingAPI = PydanticModelGenerator(
         {"key": "script_name", "type": str | None, "default": None},
         {"key": "script_args", "type": list, "default": []},
         {"key": "send_images", "type": bool, "default": True},
-        {"key": "save_images", "type": bool, "default": False},
+        # API generations save to the output folders by default (TASK-002);
+        # a request can still opt out with "save_images": false.
+        {"key": "save_images", "type": bool, "default": True},
         {"key": "alwayson_scripts", "type": dict, "default": {}},
         {"key": "force_task_id", "type": str | None, "default": None},
         {"key": "infotext", "type": str | None, "default": None},
