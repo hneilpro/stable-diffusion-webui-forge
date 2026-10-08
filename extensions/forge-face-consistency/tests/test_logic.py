@@ -53,10 +53,20 @@ def test_strength_helpers():
 
 def test_detect_family():
     assert logic.detect_family(is_sdxl=True) == "sdxl"
-    assert logic.detect_family(class_name="Flux") == "flux"
+    # Class-name substring matching is deliberately NOT trusted for
+    # "flux": this Forge build reports a flux-flavoured class name for
+    # SDXL checkpoints (live 2026-10-08: iniverseMix SDXL detected as
+    # flux). The checkpoint FILENAME is the primary signal.
+    assert logic.detect_family(class_name="Flux") == "other"
     assert logic.detect_family(checkpoint_hint="flux1-dev.safetensors") == "flux"
-    # A Flux checkpoint must win over a stale sdxl flag.
-    assert logic.detect_family(is_sdxl=True, class_name="Flux") == "flux"
+    assert logic.detect_family(checkpoint_hint="chroma-v1.safetensors") == "flux"
+    # The is_sdxl flag beats a stale flux-flavoured class name.
+    assert logic.detect_family(is_sdxl=True, class_name="Flux") == "sdxl"
+    # Regression: a flux-flavoured class name on an SDXL checkpoint must
+    # not disable the SDXL path; "other" is the safe fallback.
+    assert logic.detect_family(
+        checkpoint_hint="iniverseMixSFWNSFW_f1dRealnsfwGuofengV2.safetensors",
+        class_name="FluxEngine") == "other"
     assert logic.detect_family() == "other"
 
 

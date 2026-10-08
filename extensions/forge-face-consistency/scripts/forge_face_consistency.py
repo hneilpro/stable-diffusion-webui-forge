@@ -75,7 +75,10 @@ def _detect_family_forge(p) -> str:
         hint = getattr(info, "filename", "") or ""
     if not hint and sd_model is not None:
         hint = getattr(sd_model, "filename", "") or ""
-    return logic.detect_family(is_sdxl=is_sdxl, checkpoint_hint=hint, class_name=cls)
+    family = logic.detect_family(is_sdxl=is_sdxl, checkpoint_hint=hint, class_name=cls)
+    _log(f"family detect: is_sdxl={is_sdxl} cls={cls!r} "
+         f"hint={hint!r} -> {family}")
+    return family
 
 
 def _available_adapters():

@@ -48,21 +48,24 @@ def detect_family(is_sdxl: bool = False, checkpoint_hint: str = "",
                   class_name: str = "") -> str:
     """Classify the loaded checkpoint family.
 
-    Returns 'flux', 'sdxl', or 'other'. Flux is checked first so a Flux
-    checkpoint is never offered SDXL adapters, even if a stale flag says
-    otherwise. SDXL detection mirrors Forge's engine flags
-    (backend/diffusion_engine/*: only the SDXL engines set is_sdxl=True).
+    Returns 'flux', 'sdxl', or 'other'. The checkpoint FILENAME is the
+    primary signal: real Flux checkpoints are virtually always named
+    *flux* (or *chroma*). Class-name substring matching is deliberately
+    NOT trusted for "flux" -- this Forge build reports a flux-flavoured
+    class name for SDXL checkpoints (observed live: iniverseMix SDXL
+    classified as flux), and a wrong "flux" verdict silently disables
+    the SDXL FaceID/InstantID path. "other" is always safe: below-max
+    strength falls back to blended swap, which never sends SDXL adapters
+    to a Flux model.
     """
     hint = (checkpoint_hint or "").lower()
     cls = (class_name or "").lower()
-    if "flux" in cls or "flux" in hint or "chroma" in cls:
+    if "flux" in hint or "chroma" in hint:
         return "flux"
     if is_sdxl:
         return "sdxl"
-    if "sdxl" in hint or "xl" in cls:
-        # Class-name hint only; filename hints alone are not trusted.
-        if "sdxl" in cls or "xl" in cls:
-            return "sdxl"
+    if "sdxl" in hint or "sdxl" in cls or "xl" in cls:
+        return "sdxl"
     return "other"
 
 
