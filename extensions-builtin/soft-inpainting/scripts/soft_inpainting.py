@@ -7,7 +7,16 @@ from modules.torch_utils import float64
 
 from concurrent.futures import ThreadPoolExecutor
 from scipy.ndimage import convolve
-from joblib import Parallel, delayed, cpu_count
+
+# joblib is only used to parallelize the weighted histogram filter.
+# Make it optional so the script loads (and runs, sequentially) on
+# installs where joblib isn't present.
+try:
+    from joblib import Parallel, delayed, cpu_count
+    _joblib_available = True
+except ImportError:
+    Parallel = delayed = cpu_count = None
+    _joblib_available = False
 
 class SoftInpaintingSettings:
     def __init__(self,
@@ -388,29 +397,33 @@ def weighted_histogram_filter(img, kernel, kernel_center, percentile_min=0.0, pe
 
         return np.sum(values * overlap) / np.sum(overlap) if np.sum(overlap) > 0 else 0
 
-    # Split pixel_coords into equal chunks based on n_jobs
-    n_jobs = -1
-    if cpu_count() > 6:
-        n_jobs = 6 # More than 6 isn't worth unless it's more than 3000x3000px
+    if _joblib_available:
+        # Split pixel_coords into equal chunks based on n_jobs
+        n_jobs = 6 if (cpu_count() or 0) > 6 else (cpu_count() or 1)  # More than 6 isn't worth unless it's more than 3000x3000px
 
-    chunk_size = len(pixel_coords) // n_jobs
-    pixel_chunks = [pixel_coords[i:i + chunk_size] for i in range(0, len(pixel_coords), chunk_size)]
+        chunk_size = max(1, len(pixel_coords) // n_jobs)
+        pixel_chunks = [pixel_coords[i:i + chunk_size] for i in range(0, len(pixel_coords), chunk_size)]
 
-    # joblib to process chunks in parallel
-    def process_chunk(chunk):
-        chunk_result = {}
-        for idx in chunk:
-            chunk_result[idx] = weighted_histogram_filter_single(idx)
-        return chunk_result
+        # joblib to process chunks in parallel
+        def process_chunk(chunk):
+            chunk_result = {}
+            for idx in chunk:
+                chunk_result[idx] = weighted_histogram_filter_single(idx)
+            return chunk_result
 
-    results = Parallel(n_jobs=n_jobs, backend="loky")( # loky is fastest in my configuration
-        delayed(process_chunk)(chunk) for chunk in pixel_chunks
-    )
+        results = Parallel(n_jobs=n_jobs, backend="loky")(  # loky is fastest in my configuration
+            delayed(process_chunk)(chunk) for chunk in pixel_chunks
+        )
 
-    # Combine results into the output image
-    for chunk_result in results:
-        for (row, col), value in chunk_result.items():
-            img_out[row, col] = value
+        # Combine results into the output image
+        for chunk_result in results:
+            for (row, col), value in chunk_result.items():
+                img_out[row, col] = value
+    else:
+        # joblib not installed: run the filter sequentially. Same result, slower.
+        for idx in pixel_coords:
+            row, col = idx
+            img_out[row, col] = weighted_histogram_filter_single(idx)
 
     return img_out
 
