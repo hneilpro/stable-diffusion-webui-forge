@@ -40,7 +40,11 @@ notification.mp3
 /SwinIR
 /textual_inversion
 .vscode
-/extensions
+/extensions/*
+!/extensions/forge-face-consistency/
+!/extensions/forge-face-consistency/**
+/extensions/forge-face-consistency/**/__pycache__/
+/extensions/forge-face-consistency/**/*.pyc
 /test/stdout.txt
 /test/stderr.txt
 /cache.json*
