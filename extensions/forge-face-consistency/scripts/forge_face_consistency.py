@@ -73,7 +73,8 @@ def _opt(name, default):
         return default
 
 
-def _detect_family_forge(p) -> str:
+def _family_inputs_forge(p):
+    """(is_sdxl, class_name, filename_hint) feeding family detection."""
     sd_model = getattr(p, "sd_model", None)
     if sd_model is None and shared is not None:
         sd_model = getattr(shared, "sd_model", None)
@@ -85,6 +86,11 @@ def _detect_family_forge(p) -> str:
         hint = getattr(info, "filename", "") or ""
     if not hint and sd_model is not None:
         hint = getattr(sd_model, "filename", "") or ""
+    return is_sdxl, cls, hint
+
+
+def _detect_family_forge(p) -> str:
+    is_sdxl, cls, hint = _family_inputs_forge(p)
     family = logic.detect_family(is_sdxl=is_sdxl, checkpoint_hint=hint, class_name=cls)
     _log(f"family detect: is_sdxl={is_sdxl} cls={cls!r} "
          f"hint={hint!r} -> {family}")
@@ -364,9 +370,13 @@ def _maybe_inject_outfit_reference(p, plan, outfit_rgb, outfit_weight):
         _adapter, names = _available_adapters()
         model = logic.find_ipadapter_model(names)
         if model is None:
-            note = ("outfit reference skipped: no IP-Adapter model found; "
-                    "download ip-adapter_sdxl.safetensors "
+            face_only = logic.list_face_ipadapter_models(names)
+            note = ("outfit reference skipped: no general IP-Adapter model "
+                    "found; download ip-adapter_sdxl.safetensors "
                     "(h94/IP-Adapter sdxl_models) into models/ControlNet")
+            if face_only:
+                note += (" (face-only variants present, not used for "
+                         f"outfits: {', '.join(face_only)})")
             p.extra_generation_params["FaceConsistency outfit ref"] = note
             _log(note)
             return
@@ -526,6 +536,12 @@ if _FORGE_AVAILABLE:
             try:
                 family = _detect_family_forge(p)
                 plan["family"] = family
+                # Detection diagnostics: if the family ever looks wrong,
+                # this line says exactly why (live 2026-10-08: "other" on
+                # an SDXL checkpoint).
+                is_sdxl, cls_name, hint = _family_inputs_forge(p)
+                p.extra_generation_params["FaceConsistency family detail"] = (
+                    f"is_sdxl={is_sdxl} cls={cls_name!r} hint={hint!r}")
                 if has_face_ref:
                     adapter, _names = _available_adapters()
                     mode, downgraded, reason = logic.decide_mode(

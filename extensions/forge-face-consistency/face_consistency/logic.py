@@ -71,7 +71,11 @@ def detect_family(is_sdxl: bool = False, checkpoint_hint: str = "",
         return "flux"
     if is_sdxl:
         return "sdxl"
-    if "sdxl" in hint or "sdxl" in cls or "xl" in cls:
+    # NOTE: bare "xl" in the *filename* is trusted here (unlike "flux" in
+    # the class name, which this Forge build misreports): in checkpoint
+    # filenames "xl" overwhelmingly marks SDXL ("epicrealismXL", ...),
+    # while ordinary words almost never contain the substring "xl".
+    if "sdxl" in hint or "xl" in hint or "sdxl" in cls or "xl" in cls:
         return "sdxl"
     return "other"
 
@@ -109,22 +113,38 @@ def find_ipadapter_model(controlnet_names):
     ``controlnet_names`` is the list from
     ``lib_controlnet.global_state.controlnet_names`` (display names, 'None'
     first). Matches filenames containing 'ip-adapter' / 'ip_adapter' but
-    EXCLUDES FaceID / InstantID variants — those are face-specific and are
-    picked up by :func:`find_adapter_model` instead. A general IP-Adapter
-    (e.g. ``ip-adapter_sdxl.safetensors`` from h94/IP-Adapter) carries the
-    whole reference image's content/style, which is what outfit, object,
-    and environment references need. Deterministic: sorted, first match.
+    EXCLUDES face-specific variants (FaceID, InstantID, plus-face, ...):
+    those condition on the reference's *face*, which is wrong for outfit /
+    object / environment duty — use :func:`find_adapter_model` for faces.
+    A general IP-Adapter (e.g. ``ip-adapter_sdxl.safetensors`` from
+    h94/IP-Adapter) carries the whole reference image's content/style.
+    Deterministic: sorted, first match.
     """
     cands = []
     for name in (controlnet_names or []):
         if not name or name == "None":
             continue
         low = name.lower()
-        if ("ip-adapter" in low or "ip_adapter" in low) and not any(
-                k in low for k in ("faceid", "instantid", "instant_id",
-                                   "instant-id")):
+        if ("ip-adapter" in low or "ip_adapter" in low) and "face" not in low:
             cands.append(name)
     return sorted(cands)[0] if cands else None
+
+
+def list_face_ipadapter_models(controlnet_names):
+    """Face-specific IP-Adapter variants present (for skip-note diagnostics).
+
+    These are the models :func:`find_ipadapter_model` deliberately skips:
+    useful in the "no general IP-Adapter found" note so the user can see
+    *why* nothing was picked.
+    """
+    found = []
+    for name in (controlnet_names or []):
+        if not name or name == "None":
+            continue
+        low = name.lower()
+        if ("ip-adapter" in low or "ip_adapter" in low) and "face" in low:
+            found.append(name)
+    return sorted(found)
 
 
 def pick_ipadapter_preprocessor(model_name, family):

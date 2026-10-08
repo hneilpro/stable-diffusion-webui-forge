@@ -663,8 +663,19 @@ def test_outfit_skipped_loudly_without_model(monkeypatch):
     p = _outfit_p(_sdxl_model())
     _script().before_process(p, True, None, "", 1.0, True,
                              np.zeros((8, 8, 3), dtype=np.uint8), 0.6)
-    assert "no IP-Adapter model" in p.extra_generation_params[
+    assert "no general IP-Adapter model" in p.extra_generation_params[
         "FaceConsistency outfit ref"]
+
+
+def test_outfit_skip_names_face_only_variants(monkeypatch):
+    _patch_ipadapter_names(
+        monkeypatch, ["None", "ip-adapter-plus-face_sdxl_vit-h [368cf551]"])
+    p = _outfit_p(_sdxl_model())
+    _script().before_process(p, True, None, "", 1.0, True,
+                             np.zeros((8, 8, 3), dtype=np.uint8), 0.6)
+    note = p.extra_generation_params["FaceConsistency outfit ref"]
+    assert "no general IP-Adapter model" in note
+    assert "ip-adapter-plus-face_sdxl_vit-h [368cf551]" in note
 
 
 def test_outfit_skipped_on_flux():

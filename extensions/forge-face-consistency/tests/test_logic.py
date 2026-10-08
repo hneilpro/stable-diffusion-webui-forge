@@ -208,3 +208,24 @@ def test_head_height_assessment_degenerate_input():
     assert logic.head_height_assessment(0, 1024) == (0.0, None)
     assert logic.head_height_assessment(100, 0) == (0.0, None)
     assert logic.head_height_assessment(None, 1024) == (0.0, None)
+
+
+def test_find_ipadapter_model_skips_plus_face():
+    # Live 2026-10-08: the box's only IP-Adapter was a plus-face build;
+    # it must not be picked for outfit duty (face-only conditioning).
+    names = ["None", "ip-adapter-plus-face_sdxl_vit-h [368cf551]"]
+    assert logic.find_ipadapter_model(names) is None
+    assert logic.list_face_ipadapter_models(names) == [
+        "ip-adapter-plus-face_sdxl_vit-h [368cf551]"]
+
+
+def test_list_face_ipadapter_models_empty_for_general():
+    assert logic.list_face_ipadapter_models(
+        ["None", "ip-adapter_sdxl [b]"]) == []
+
+
+def test_detect_family_xl_in_filename():
+    # Bare "XL" in the checkpoint filename marks SDXL even without the
+    # "sd" prefix (live 2026-10-08: epicrealismXL misdetected as "other").
+    assert logic.detect_family(
+        checkpoint_hint="epicrealismXL_vxviiCrystalclear.safetensors") == "sdxl"
