@@ -605,3 +605,160 @@ def test_representative_engine_failure_falls_back_to_first(monkeypatch,
     # sorted-first decodable file wins, exactly like engine=None
     assert rgb[0, 0, 0] == 10
     assert "a.jpg" in note
+
+
+# --- outfit / object reference via built-in IP-Adapter ----------------------
+
+def _patch_ipadapter_names(monkeypatch, names):
+    monkeypatch.setattr(mod, "_available_adapters", lambda: (None, names))
+
+
+def _outfit_p(sd_model, n_slots=2):
+    args = [SimpleNamespace(enabled=False) for _ in range(n_slots)]
+    return _fake_p(sd_model=sd_model,
+                   scripts=_cn_runner(args, [False] * n_slots),
+                   script_args=args)
+
+
+def test_outfit_reference_injects_ipadapter_unit(monkeypatch):
+    built = []
+
+    def fake_build(pre, model_name, weight, ref_rgb):
+        built.append((pre, model_name, weight))
+        return SimpleNamespace(enabled=True)
+
+    monkeypatch.setattr(mod, "_build_controlnet_unit", fake_build)
+    _patch_ipadapter_names(monkeypatch, ["None", "ip-adapter_sdxl [abcd]"])
+    p = _outfit_p(_sdxl_model())
+    outfit = np.zeros((8, 8, 3), dtype=np.uint8)
+    _script().before_process(p, True, None, "", 1.0, True, outfit, 0.6)
+    assert p._ffc_plan["mode"] == "outfit-only"  # no face ref given
+    assert len(built) == 1
+    pre, model_name, weight = built[0]
+    assert pre == logic.PREPROCESSOR_IPADAPTER_BIGG
+    assert model_name == "ip-adapter_sdxl [abcd]"
+    assert weight == pytest.approx(0.6)
+    assert "ip-adapter_sdxl [abcd]" in p.extra_generation_params[
+        "FaceConsistency outfit ref"]
+
+
+def test_outfit_uses_vith_preprocessor_for_vith_model(monkeypatch):
+    built = []
+
+    def fake_build(pre, model_name, weight, ref_rgb):
+        built.append(pre)
+        return SimpleNamespace(enabled=True)
+
+    monkeypatch.setattr(mod, "_build_controlnet_unit", fake_build)
+    _patch_ipadapter_names(
+        monkeypatch, ["None", "ip-adapter-plus_sdxl_vit-h [efgh]"])
+    p = _outfit_p(_sdxl_model())
+    _script().before_process(p, True, None, "", 1.0, True,
+                             np.zeros((8, 8, 3), dtype=np.uint8), 0.5)
+    assert built == [logic.PREPROCESSOR_IPADAPTER_H]
+
+
+def test_outfit_skipped_loudly_without_model(monkeypatch):
+    _patch_ipadapter_names(monkeypatch, ["None", "control_v11p_sd15_canny"])
+    p = _outfit_p(_sdxl_model())
+    _script().before_process(p, True, None, "", 1.0, True,
+                             np.zeros((8, 8, 3), dtype=np.uint8), 0.6)
+    assert "no IP-Adapter model" in p.extra_generation_params[
+        "FaceConsistency outfit ref"]
+
+
+def test_outfit_skipped_on_flux():
+    model = SimpleNamespace(
+        is_sdxl=False,
+        sd_checkpoint_info=SimpleNamespace(filename="flux1-dev.safetensors"))
+    p = _fake_p(sd_model=model)
+    _script().before_process(p, True, None, "", 1.0, True,
+                             np.zeros((8, 8, 3), dtype=np.uint8), 0.6)
+    assert "Flux" in p.extra_generation_params["FaceConsistency outfit ref"]
+
+
+def test_face_and_outfit_units_share_slots(monkeypatch):
+    built = []
+
+    def fake_build(pre, model_name, weight, ref_rgb):
+        built.append((pre, model_name, weight))
+        return SimpleNamespace(enabled=True)
+
+    monkeypatch.setattr(mod, "_build_controlnet_unit", fake_build)
+    monkeypatch.setattr(
+        mod, "_available_adapters",
+        lambda: (("faceid", logic.PREPROCESSOR_FACEID, "fake-faceid [a]"),
+                 ["None", "fake-faceid [a]", "ip-adapter_sdxl [b]"]))
+    args = [SimpleNamespace(enabled=False), SimpleNamespace(enabled=False)]
+    p = _fake_p(sd_model=_sdxl_model(),
+                scripts=_cn_runner(args, [False, False]),
+                script_args=args)
+    face = np.zeros((8, 8, 3), dtype=np.uint8)
+    outfit = np.ones((8, 8, 3), dtype=np.uint8)
+    _script().before_process(p, True, face, "", 0.85, True, outfit, 0.6)
+    assert p._ffc_plan["mode"] == "faceid"
+    assert len(built) == 2
+    assert built[0][0] == logic.PREPROCESSOR_FACEID
+    assert built[0][2] == pytest.approx(0.85)
+    assert built[1][0] == logic.PREPROCESSOR_IPADAPTER_BIGG
+    assert built[1][2] == pytest.approx(0.6)
+    assert p.script_args[0].enabled is True
+    assert p.script_args[1].enabled is True
+
+
+def test_outfit_off_by_default_writes_nothing(monkeypatch):
+    built = []
+    monkeypatch.setattr(
+        mod, "_build_controlnet_unit",
+        lambda *a, **k: built.append(1) or SimpleNamespace(enabled=True))
+    _patch_ipadapter_names(monkeypatch, ["None", "ip-adapter_sdxl [abcd]"])
+    p = _outfit_p(_sdxl_model())
+    # strength 0 -> outfit path idle, no infotext key
+    _script().before_process(p, True, None, "", 1.0, True,
+                             np.zeros((8, 8, 3), dtype=np.uint8), 0.0)
+    assert built == []
+    assert "FaceConsistency outfit ref" not in p.extra_generation_params
+
+
+# --- head-height proportion gate in postprocess_image -------------------------
+
+def _run_blended_with_bbox(monkeypatch, img_hw, bbox, similarity_after):
+    pil, image_mod = _fake_pil()
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2())
+    monkeypatch.setitem(sys.modules, "PIL", pil)
+    monkeypatch.setitem(sys.modules, "PIL.Image", image_mod)
+    info = {"similarity_before": 0.10, "similarity_after": similarity_after,
+            "restored_by": "detail-graft",
+            "face_bbox": [float(v) for v in bbox],
+            "face_size_ratio": 0.05}
+
+    class _App:
+        def get(self, img):
+            return [SimpleNamespace(bbox=bbox)]
+
+    engine = SimpleNamespace(
+        app=_App(),
+        swap=lambda target, ref, restore=True: (np.array(target, copy=True),
+                                                info))
+    monkeypatch.setattr(mod, "_get_engine", lambda p: engine)
+    plan = {"enabled": True, "mode": "blended-swap", "strength": 0.5,
+            "restore": True, "verify_threshold": 0.55, "refs_dir": "",
+            "ref_bgr": np.zeros((8, 8, 3), dtype=np.uint8),
+            "downgraded": False, "reason": "test"}
+    p = _fake_p(_ffc_plan=plan)
+    pp = SimpleNamespace(image=np.zeros((img_hw, img_hw, 3), dtype=np.uint8))
+    _script().postprocess_image(p, pp, True, None, "", 0.5, True)
+    return p
+
+
+def test_head_height_recorded_in_params(monkeypatch):
+    p = _run_blended_with_bbox(monkeypatch, 64, (10, 10, 30, 30), 0.93)
+    assert p.extra_generation_params[
+        "FaceConsistency head height"] == "31.2% of frame"
+    assert "FaceConsistency proportion" not in p.extra_generation_params
+
+
+def test_head_height_warns_when_tiny(monkeypatch):
+    p = _run_blended_with_bbox(monkeypatch, 64, (1, 1, 5, 5), 0.93)
+    assert "closer crop" in p.extra_generation_params[
+        "FaceConsistency proportion"]

@@ -10,9 +10,19 @@ consistent across SDXL and Flux checkpoints:
 - Otherwise (Flux, or SDXL without an adapter): blended swap at
   blend=strength inside a feathered face mask.
 
-Every run records the mode actually used, the strength, and the ArcFace
-similarity before/after in the infotext. A downgrade is always logged,
-never silent. Flux never receives SDXL adapters.
+A second, independent control — Reference outfit / object + Outfit
+reference strength — injects a general IP-Adapter ControlNet unit
+(Forge's built-in sd_forge_ipadapter) so a photo of an outfit, a prop,
+or an environment steers the generation. Needs an IP-Adapter model
+(e.g. ip-adapter_sdxl.safetensors) in models/ControlNet; the CLIP
+vision encoder auto-downloads. SDXL and SD1.5 only — Flux has no
+IP-Adapter in this Forge build and the outfit reference is skipped
+with a logged reason.
+
+Every run records the mode actually used, the strength, the outfit
+reference (or its skip reason), the ArcFace similarity before/after,
+and a head-height proportion assessment in the infotext. A downgrade
+is always logged, never silent. Flux never receives SDXL adapters.
 
 The pure decision logic lives in face_consistency.logic (importable and
 unit-tested without Forge); this module is the Forge-facing shell.
@@ -330,6 +340,56 @@ def _maybe_inject_character_lora(p, plan):
         _log(f"character LoRA injection skipped ({exc})")
 
 
+def _maybe_inject_outfit_reference(p, plan, outfit_rgb, outfit_weight):
+    """IP-Adapter outfit/object reference via Forge's built-in IP-Adapter.
+
+    Independent of the face path: injects a second ControlNet unit using
+    Forge's sd_forge_ipadapter (general image conditioning, not
+    face-specific), so a photo of an outfit, a prop, or an environment
+    steers the generation. A well-composed reference also transfers
+    composition/proportions. Needs an IP-Adapter model
+    (e.g. ip-adapter_sdxl.safetensors from h94/IP-Adapter) in
+    models/ControlNet; the CLIP vision encoder auto-downloads on first
+    use. SDXL and SD1.5 only — Flux has no IP-Adapter in this Forge
+    build. Never raises; every outcome is recorded in the infotext.
+    """
+    try:
+        family = plan.get("family") or _detect_family_forge(p)
+        if family == "flux":
+            note = ("outfit reference skipped: no Flux IP-Adapter "
+                    "in this Forge build")
+            p.extra_generation_params["FaceConsistency outfit ref"] = note
+            _log(note)
+            return
+        _adapter, names = _available_adapters()
+        model = logic.find_ipadapter_model(names)
+        if model is None:
+            note = ("outfit reference skipped: no IP-Adapter model found; "
+                    "download ip-adapter_sdxl.safetensors "
+                    "(h94/IP-Adapter sdxl_models) into models/ControlNet")
+            p.extra_generation_params["FaceConsistency outfit ref"] = note
+            _log(note)
+            return
+        preprocessor = logic.pick_ipadapter_preprocessor(model, family)
+        unit = _build_controlnet_unit(preprocessor, model,
+                                      float(outfit_weight), outfit_rgb)
+        if _inject_controlnet_unit(p, unit):
+            note = f"{model} @ {float(outfit_weight):.2f} ({preprocessor})"
+            p.extra_generation_params["FaceConsistency outfit ref"] = note
+            _log(f"outfit reference injected: {note}")
+        else:
+            note = "outfit reference skipped: no free ControlNet slot"
+            p.extra_generation_params["FaceConsistency outfit ref"] = note
+            _log(note)
+    except Exception as exc:
+        note = f"outfit reference failed: {exc}"
+        try:
+            p.extra_generation_params["FaceConsistency outfit ref"] = note
+        except Exception:
+            pass
+        _log(note)
+
+
 def _build_controlnet_unit(preprocessor_name, model_name, weight, ref_rgb):
     """ControlNetUnit matching this clone's lib_controlnet.external_code.
 
@@ -409,6 +469,8 @@ if _FORGE_AVAILABLE:
             default_enabled = bool(_opt(ffc_settings.OPT_ENABLED, ffc_settings.DEFAULT_ENABLED))
             default_strength = float(_opt(ffc_settings.OPT_STRENGTH, ffc_settings.DEFAULT_STRENGTH))
             default_restore = bool(_opt(ffc_settings.OPT_RESTORE, ffc_settings.DEFAULT_RESTORE))
+            default_outfit_strength = float(_opt(ffc_settings.OPT_OUTFIT_STRENGTH,
+                                                 ffc_settings.DEFAULT_OUTFIT_STRENGTH))
             with InputAccordion(default_enabled, label=SCRIPT_NAME,
                                 elem_id="ffc_accordion") as enabled:
                 ref_image = gr.Image(label="Reference face", type="numpy")
@@ -420,14 +482,26 @@ if _FORGE_AVAILABLE:
                     label="Reference strength (max = full face swap)",
                     minimum=0.0, maximum=1.0, step=0.01, value=default_strength)
                 restore = gr.Checkbox(label="Restore face detail after swap", value=default_restore)
+                outfit_image = gr.Image(
+                    label="Reference outfit / object (optional)",
+                    type="numpy")
+                outfit_strength = gr.Slider(
+                    label="Outfit reference strength (0 = off)",
+                    minimum=0.0, maximum=1.0, step=0.01,
+                    value=default_outfit_strength)
             self.infotext_fields = [
                 (enabled, "FaceConsistency enabled"),
                 (strength, "FaceConsistency strength"),
             ]
-            return enabled, ref_image, refs_dir, strength, restore
+            return (enabled, ref_image, refs_dir, strength, restore,
+                    outfit_image, outfit_strength)
 
         # -- decision + ControlNet injection (runs before sampling) -------
-        def before_process(self, p, enabled, ref_image, refs_dir, strength, restore):
+        # New args (outfit_image, outfit_strength) append at the end with
+        # defaults, so older 5-arg API calls keep working.
+        def before_process(self, p, enabled=False, ref_image=None, refs_dir="",
+                           strength=1.0, restore=True,
+                           outfit_image=None, outfit_strength=0.0):
             # New generation: drop any engine cached by a previous run so
             # a changed inswapper path is honoured.
             if hasattr(p, "_ffc_engine"):
@@ -439,59 +513,73 @@ if _FORGE_AVAILABLE:
             p._ffc_plan = plan
             if not enabled:
                 return
-            if ref_image is None and not (refs_dir and str(refs_dir).strip()):
-                plan["reason"] = "enabled but no reference image or folder given"
+            has_face_ref = (ref_image is not None
+                            or (refs_dir and str(refs_dir).strip()))
+            outfit_rgb = _ref_to_rgb(outfit_image)
+            outfit_w = logic.clamp_strength(outfit_strength)
+            if not has_face_ref and outfit_rgb is None:
+                plan["reason"] = ("enabled but no face reference or "
+                                   "outfit reference given")
                 _log("enabled with no reference; doing nothing")
                 return
             _maybe_inject_character_lora(p, plan)
             try:
                 family = _detect_family_forge(p)
-                adapter, _names = _available_adapters()
-                mode, downgraded, reason = logic.decide_mode(
-                    plan["strength"], family, adapter is not None)
-                plan.update(family=family, downgraded=downgraded, reason=reason)
-                if mode == "controlnet" and adapter is not None:
-                    kind, preprocessor_name, model_name = adapter
-                    # F1: the unit needs a concrete image. A folder-only (or
-                    # folder-overriding) reference must hand ControlNet a
-                    # decoded representative, never np.asarray(None).
-                    # With an engine, the sharpest detectable face wins over
-                    # the first file in sorted order.
-                    unit_rgb, unit_src = representative_rgb_for_unit(
-                        ref_image, refs_dir, engine=_unit_engine(p, refs_dir))
-                    if unit_rgb is None:
-                        mode = "blended-swap"
-                        plan.update(mode=mode, downgraded=True,
-                                    reason=f"no reference image for ControlNet unit "
-                                           f"({unit_src}); using blended swap")
-                        _log(f"ControlNet unit image unavailable ({unit_src}); "
-                             f"downgrading to blended swap")
-                    else:
-                        unit = _build_controlnet_unit(preprocessor_name, model_name,
-                                                      plan["strength"], unit_rgb)
-                        plan["controlnet_image_source"] = unit_src
-                        if _inject_controlnet_unit(p, unit):
-                            plan["mode"] = kind
-                            plan["controlnet_model"] = model_name
-                            _log(f"injected ControlNet {kind} unit "
-                                 f"(model={model_name}, weight={plan['strength']:.2f}, "
-                                 f"image={unit_src})")
-                        else:
+                plan["family"] = family
+                if has_face_ref:
+                    adapter, _names = _available_adapters()
+                    mode, downgraded, reason = logic.decide_mode(
+                        plan["strength"], family, adapter is not None)
+                    plan.update(downgraded=downgraded, reason=reason)
+                    if mode == "controlnet" and adapter is not None:
+                        kind, preprocessor_name, model_name = adapter
+                        # F1: the unit needs a concrete image. A folder-only (or
+                        # folder-overriding) reference must hand ControlNet a
+                        # decoded representative, never np.asarray(None).
+                        # With an engine, the sharpest detectable face wins over
+                        # the first file in sorted order.
+                        unit_rgb, unit_src = representative_rgb_for_unit(
+                            ref_image, refs_dir, engine=_unit_engine(p, refs_dir))
+                        if unit_rgb is None:
                             mode = "blended-swap"
                             plan.update(mode=mode, downgraded=True,
-                                        reason="ControlNet injection failed (no free slot); "
-                                               "using blended swap")
-                            _log("ControlNet injection failed; downgrading to blended swap")
-                elif mode == "controlnet":
-                    mode = "blended-swap"
-                    plan.update(mode=mode, downgraded=True,
-                                reason="adapter reported available but unresolved; "
-                                       "using blended swap")
-                else:
-                    plan["mode"] = mode
-                if plan["mode"] in ("swap", "blended-swap"):
+                                        reason=f"no reference image for ControlNet unit "
+                                               f"({unit_src}); using blended swap")
+                            _log(f"ControlNet unit image unavailable ({unit_src}); "
+                                 f"downgrading to blended swap")
+                        else:
+                            unit = _build_controlnet_unit(preprocessor_name, model_name,
+                                                          plan["strength"], unit_rgb)
+                            plan["controlnet_image_source"] = unit_src
+                            if _inject_controlnet_unit(p, unit):
+                                plan["mode"] = kind
+                                plan["controlnet_model"] = model_name
+                                _log(f"injected ControlNet {kind} unit "
+                                     f"(model={model_name}, weight={plan['strength']:.2f}, "
+                                     f"image={unit_src})")
+                            else:
+                                mode = "blended-swap"
+                                plan.update(mode=mode, downgraded=True,
+                                            reason="ControlNet injection failed (no free slot); "
+                                                   "using blended swap")
+                                _log("ControlNet injection failed; downgrading to blended swap")
+                    elif mode == "controlnet":
+                        mode = "blended-swap"
+                        plan.update(mode=mode, downgraded=True,
+                                    reason="adapter reported available but unresolved; "
+                                           "using blended swap")
+                    else:
+                        plan["mode"] = mode
+                if has_face_ref and plan["mode"] in ("swap", "blended-swap"):
                     plan["ref_bgr"] = _ref_to_bgr(ref_image)
                     plan["refs_dir"] = str(refs_dir).strip() if refs_dir else ""
+                if not has_face_ref:
+                    # Outfit-only run: the face decision above never ran.
+                    plan["mode"] = "outfit-only"
+                    plan["reason"] = "no face reference; outfit reference only"
+                if outfit_rgb is not None and outfit_w > 0:
+                    _maybe_inject_outfit_reference(p, plan, outfit_rgb,
+                                                   outfit_w)
             except Exception as exc:
                 # Setup failure must never kill the host generation or
                 # vanish silently: live round 2 (2026-10-08) showed an
@@ -503,11 +591,16 @@ if _FORGE_AVAILABLE:
 
                 traceback.print_exc()
                 plan["error"] = str(exc)
-                plan["ref_bgr"] = _ref_to_bgr(ref_image)
-                plan["refs_dir"] = str(refs_dir).strip() if refs_dir else ""
-                plan.update(mode="blended-swap", downgraded=True,
-                            reason=f"setup failed ({exc}); using blended swap")
-                _log(f"setup FAILED ({exc}); falling back to blended swap")
+                if has_face_ref:
+                    plan["ref_bgr"] = _ref_to_bgr(ref_image)
+                    plan["refs_dir"] = str(refs_dir).strip() if refs_dir else ""
+                    plan.update(mode="blended-swap", downgraded=True,
+                                reason=f"setup failed ({exc}); using blended swap")
+                else:
+                    plan.update(mode="outfit-only", downgraded=True,
+                                reason=f"setup failed ({exc}); "
+                                       f"outfit reference only")
+                _log(f"setup FAILED ({exc}); falling back")
             p.extra_generation_params.update({
                 "FaceConsistency mode": plan["mode"],
                 "FaceConsistency strength": f"{plan['strength']:.2f}",
@@ -522,18 +615,23 @@ if _FORGE_AVAILABLE:
                  f"family={plan.get('family', 'unknown')} ({plan['reason']})")
 
         # -- swap / blended swap (per generated image) --------------------
-        def postprocess_image(self, p, pp, enabled, ref_image, refs_dir, strength, restore):
+        def postprocess_image(self, p, pp, enabled=False, ref_image=None,
+                              refs_dir="", strength=1.0, restore=True,
+                              outfit_image=None, outfit_strength=0.0):
             plan = getattr(p, "_ffc_plan", None)
             if not plan or not plan.get("enabled"):
                 return
             if plan["mode"] not in ("swap", "blended-swap"):
-                # ControlNet reference path: identity was formed in
-                # diffusion, so there is no swap similarity to report.
-                # Record n/a explicitly instead of staying silent (F7).
+                # No swap ran: the ControlNet reference path forms
+                # identity during diffusion, and outfit-only runs have no
+                # face reference at all. Record n/a explicitly instead of
+                # staying silent (F7).
+                why = ("no face reference" if plan["mode"] == "outfit-only"
+                       else "controlnet")
                 p.extra_generation_params.setdefault(
-                    "FaceConsistency similarity before", "n/a (controlnet)")
+                    "FaceConsistency similarity before", f"n/a ({why})")
                 p.extra_generation_params.setdefault(
-                    "FaceConsistency similarity after", "n/a (controlnet)")
+                    "FaceConsistency similarity after", f"n/a ({why})")
                 return
             try:
                 from face_consistency import blend as blend_mod
@@ -590,6 +688,25 @@ if _FORGE_AVAILABLE:
                         p.extra_generation_params["FaceConsistency note"] = (
                             "small target face (<2% of image); a closer crop "
                             "swaps more reliably")
+                # Proportion gate: head height vs frame height, measured
+                # from the swapped face bbox. Implausibly small heads get
+                # an honest warning, never a silent pass.
+                bbox = info.get("face_bbox")
+                if bbox:
+                    try:
+                        head_ratio, head_warn = logic.head_height_assessment(
+                            float(bbox[3]) - float(bbox[1]),
+                            float(swapped_bgr.shape[0]))
+                        if head_ratio > 0:
+                            p.extra_generation_params[
+                                "FaceConsistency head height"] = (
+                                f"{head_ratio:.1%} of frame")
+                        if head_warn:
+                            p.extra_generation_params[
+                                "FaceConsistency proportion"] = head_warn
+                            _log(f"WARNING: {head_warn}")
+                    except Exception:
+                        pass
                 # F4: the verify threshold is consumed here — a swap that
                 # lands below it is warned on, not reported like a pass.
                 threshold = plan.get("verify_threshold", _verify_threshold())
@@ -657,6 +774,11 @@ if _FORGE_AVAILABLE:
             ffc_settings.DEFAULT_LORA_WEIGHT,
             "Character LoRA weight (0 = off)",
             gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.05},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_OUTFIT_STRENGTH, shared.OptionInfo(
+            ffc_settings.DEFAULT_OUTFIT_STRENGTH,
+            "Outfit / object reference default strength (0 = off)",
+            gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01},
             section=section))
 
     on_ui_settings(_on_ui_settings)

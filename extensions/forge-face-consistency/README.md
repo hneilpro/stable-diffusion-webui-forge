@@ -11,9 +11,11 @@ chosen face consistent across SDXL and Flux generations in
 | `< 1.0`, otherwise | Blended swap: full swap composited inside a feathered face mask at `blend = strength`. This is the honest fallback for Flux (Forge ships no Flux FaceID adapter) and for SDXL without an adapter model. |
 
 Every run writes the mode actually used (`faceid` / `instantid` /
-`blended-swap` / `swap`) and the strength into the image infotext. The
+`blended-swap` / `swap` / `outfit-only`) and the strength into the image infotext. The
 swap and blended-swap paths also record the ArcFace similarity
-before/after, the target face's share of the image, plus a warning when
+before/after, the target face's share of the image, a head-height
+proportion assessment (`FaceConsistency head height`, with a warning
+when the head is implausibly small for the frame), plus a warning when
 the result lands below the verify threshold (Settings → Forge Face
 Consistency). The ControlNet reference paths form identity during
 diffusion, so their similarity is recorded as `n/a (controlnet)` rather
@@ -45,6 +47,57 @@ learning rate 1e-4, ~100–200 steps per image, bf16 — about 10–30
 minutes with kohya sd-scripts or ai-toolkit. Name the file after the
 character (e.g. `tori_xl.safetensors`) and put that name in the setting.
 
+## Outfit / object reference — dress the character from a photo
+
+A second, independent control — **Reference outfit / object** plus
+**Outfit reference strength** — injects a general IP-Adapter ControlNet
+unit (Forge's built-in `sd_forge_ipadapter`), so a photo of an outfit, a
+prop, or an environment steers the generation. It works at any face
+strength (including a max-strength face swap) because it occupies its
+own ControlNet slot, and it also works with no face reference at all
+(`outfit-only` mode). A well-composed reference photo transfers
+composition and body proportions too, which is the most reliable fix
+found for small-head full-body renders.
+
+Setup:
+
+1. Download `ip-adapter_sdxl.safetensors` from
+   `h94/IP-Adapter` (`sdxl_models` folder) and save it in
+   `models/ControlNet/` (filename must contain `ip-adapter`).
+2. Restart Forge. The CLIP vision encoder (`CLIP-ViT-bigG`) downloads
+   automatically on first use.
+3. In the accordion, drop an outfit/object photo into **Reference outfit
+   / object** and set **Outfit reference strength** to 0.4–0.7
+   (0.5 balances the photo against your prompt; higher follows the
+   photo more literally). 0 = off.
+
+Notes:
+
+- SDXL and SD1.5 only. Flux has no IP-Adapter in this Forge build, so
+  the outfit reference is skipped with a logged reason on Flux.
+- If no IP-Adapter model is found, the run continues without it and
+  the infotext says exactly which file to download — never silent.
+- The same mechanism accepts any reference subject: a jacket, a
+  robotic arm, a desk setup — anything you want carried into the scene.
+
+## Body proportions — what actually works
+
+Measured finding (Oct 2026, SDXL photoreal checkpoints): extreme
+full-body framing (e.g. 768×1152, head-to-feet) renders heads too small
+to look right, and no prompt wording fully corrects it. What works:
+
+- **3/4 framing** (head to knees, 768×1024): the head lands at a
+  natural size. This is the recommended framing for character work.
+- **Outfit/style reference** (above) with a well-proportioned photo:
+  the IP-Adapter conditioning transfers composition as well as
+  garments.
+- Prompt grounding helps at the margin: `realistic natural
+  head-to-body proportions`, and negative `small head, elongated body`.
+- The extension measures every swapped face and writes
+  `FaceConsistency head height` (head height as % of frame) into the
+  infotext, warning when it drops below 7% — an implausibly small head
+  for any framing with a visible face.
+
 ## Use
 
 1. Open the **Forge Face Consistency** accordion (txt2img or img2img).
@@ -53,11 +106,15 @@ character (e.g. `tori_xl.safetensors`) and put that name in the setting.
    outlier-cleaned identity template). For the ControlNet reference path,
    the folder's image files are tried in sorted order until one decodes.
 3. Set strength: max for a guaranteed swap, lower for a guided reference.
+4. Optionally, drop an outfit/object photo into *Reference outfit /
+   object* and set its strength (see above).
 
 Global defaults (enable, strength, restore, verify threshold, inswapper
-path) live under **Settings → Forge Face Consistency**. Via the API, pass
-the same five values under `alwayson_scripts` → `Forge Face Consistency`
-→ `args` (`[enabled, ref_image_base64, refs_dir, strength, restore]`).
+path, outfit strength) live under **Settings → Forge Face Consistency**. Via the API, pass
+the same values under `alwayson_scripts` → `Forge Face Consistency`
+→ `args` (`[enabled, ref_image_base64, refs_dir, strength, restore,
+outfit_image_base64, outfit_strength]` — the two outfit args are new and
+optional; older 5-arg calls keep working).
 
 ## Requirements
 
@@ -69,6 +126,9 @@ the same five values under `alwayson_scripts` → `Forge Face Consistency`
   is used instead (softer, can leave a visible seam).
 - For the below-max SDXL reference path: an IP-Adapter FaceID or InstantID
   ControlNet model in `models/ControlNet/`.
+- For the outfit / object reference path: a general IP-Adapter model
+  (e.g. `ip-adapter_sdxl.safetensors`) in `models/ControlNet/`
+  (see above). Not needed for face-only work.
 
 ## GFPGAN — two different files, two different jobs
 

@@ -372,6 +372,7 @@ class FaceSwapEngine:
             "target_faces": nfaces,
             "identity_sources": n_sources,
             "face_size_ratio": face_size_ratio,
+            "face_bbox": [float(v) for v in dst.bbox],
             "face_sharpness_before": sharp_before,
             "face_sharpness_swapped": sharp_swapped,
             "face_sharpness": face_sharpness(out, largest(out_faces)) if out_faces else None,

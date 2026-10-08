@@ -152,3 +152,59 @@ def test_ort_providers_cpu_is_always_last():
     provs = _ort_providers()
     assert len(provs) >= 1
     assert provs[-1] == "CPUExecutionProvider"
+
+
+# --- general IP-Adapter model picking ----------------------------------------
+
+def test_find_ipadapter_model_skips_face_variants():
+    names = ["None", "ip-adapter-faceid-plusv2_sdxl [a]",
+             "ip-adapter_sdxl [b]", "instantid-controlnet [c]"]
+    assert logic.find_ipadapter_model(names) == "ip-adapter_sdxl [b]"
+
+
+def test_find_ipadapter_model_none_when_absent():
+    assert logic.find_ipadapter_model(
+        ["None", "control_v11p_sd15_canny"]) is None
+    assert logic.find_ipadapter_model([]) is None
+    assert logic.find_ipadapter_model(None) is None
+
+
+def test_find_ipadapter_model_deterministic_first_sorted():
+    names = ["None", "ip-adapter-plus_sdxl [z]", "ip-adapter_sdxl [a]"]
+    # "-" (0x2D) sorts before "_" (0x5F): the plus build wins deterministically
+    assert logic.find_ipadapter_model(names) == "ip-adapter-plus_sdxl [z]"
+
+
+# --- IP-Adapter preprocessor picking ------------------------------------------
+
+def test_pick_ipadapter_preprocessor():
+    assert logic.pick_ipadapter_preprocessor(
+        "ip-adapter_sdxl [b]", "sdxl") == logic.PREPROCESSOR_IPADAPTER_BIGG
+    assert logic.pick_ipadapter_preprocessor(
+        "ip-adapter-plus_sdxl_vit-h [c]",
+        "sdxl") == logic.PREPROCESSOR_IPADAPTER_H
+    assert logic.pick_ipadapter_preprocessor(
+        "ip-adapter_sd15 [d]", "other") == logic.PREPROCESSOR_IPADAPTER_H
+    assert logic.pick_ipadapter_preprocessor(
+        "ip-adapter_sdxl [b]", "flux") is None
+
+
+# --- head-height proportion gate ------------------------------------------------
+
+def test_head_height_assessment_normal():
+    ratio, warn = logic.head_height_assessment(115, 1024)
+    assert warn is None
+    assert ratio == pytest.approx(115 / 1024)
+
+
+def test_head_height_assessment_warns_when_tiny():
+    ratio, warn = logic.head_height_assessment(50, 1024)
+    assert warn is not None
+    assert "closer crop" in warn
+    assert ratio == pytest.approx(50 / 1024)
+
+
+def test_head_height_assessment_degenerate_input():
+    assert logic.head_height_assessment(0, 1024) == (0.0, None)
+    assert logic.head_height_assessment(100, 0) == (0.0, None)
+    assert logic.head_height_assessment(None, 1024) == (0.0, None)

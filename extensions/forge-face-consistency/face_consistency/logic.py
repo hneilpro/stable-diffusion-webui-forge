@@ -15,6 +15,13 @@ EPS = 1e-6
 # extensions-builtin/sd_forge_ipadapter/scripts/forge_ipadapter.py
 PREPROCESSOR_FACEID = "InsightFace+CLIP-H (IPAdapter)"
 PREPROCESSOR_INSTANTID = "InsightFace (InstantID)"
+PREPROCESSOR_IPADAPTER_H = "CLIP-ViT-H (IPAdapter)"
+PREPROCESSOR_IPADAPTER_BIGG = "CLIP-ViT-bigG (IPAdapter)"
+
+# Head-height proportion gate: a visible head below this share of the
+# frame height is implausibly small for any framing and gets a warning
+# (mirrors the verify-threshold pattern: measured, reported, never fatal).
+HEAD_HEIGHT_WARN_BELOW = 0.07
 
 # Same-person verify threshold (ArcFace cosine). Kept in sync with
 # settings.DEFAULT_VERIFY_THRESHOLD; consumed by the script shell to warn
@@ -94,6 +101,70 @@ def find_adapter_model(controlnet_names):
     if instantid is not None:
         return ("instantid", PREPROCESSOR_INSTANTID, instantid)
     return None
+
+
+def find_ipadapter_model(controlnet_names):
+    """General (non-face) IP-Adapter ControlNet model, or None.
+
+    ``controlnet_names`` is the list from
+    ``lib_controlnet.global_state.controlnet_names`` (display names, 'None'
+    first). Matches filenames containing 'ip-adapter' / 'ip_adapter' but
+    EXCLUDES FaceID / InstantID variants — those are face-specific and are
+    picked up by :func:`find_adapter_model` instead. A general IP-Adapter
+    (e.g. ``ip-adapter_sdxl.safetensors`` from h94/IP-Adapter) carries the
+    whole reference image's content/style, which is what outfit, object,
+    and environment references need. Deterministic: sorted, first match.
+    """
+    cands = []
+    for name in (controlnet_names or []):
+        if not name or name == "None":
+            continue
+        low = name.lower()
+        if ("ip-adapter" in low or "ip_adapter" in low) and not any(
+                k in low for k in ("faceid", "instantid", "instant_id",
+                                   "instant-id")):
+            cands.append(name)
+    return sorted(cands)[0] if cands else None
+
+
+def pick_ipadapter_preprocessor(model_name, family):
+    """CLIP-vision preprocessor for a general IP-Adapter model.
+
+    Returns None for Flux (this Forge build ships no Flux IP-Adapter).
+    SDXL: the h94 filename decides — the ``vit-h`` builds pair with the
+    ViT-H encoder, everything else with bigG. SD1.5 (family 'other'):
+    ViT-H, matching the SD1.5 adapter's encoder.
+    """
+    if family == "flux":
+        return None
+    if family == "sdxl":
+        low = (model_name or "").lower()
+        if "vit-h" in low or "vith" in low or "vit_h" in low:
+            return PREPROCESSOR_IPADAPTER_H
+        return PREPROCESSOR_IPADAPTER_BIGG
+    return PREPROCESSOR_IPADAPTER_H
+
+
+def head_height_assessment(face_h, img_h):
+    """(ratio, warning_or_None) for the head-height proportion gate.
+
+    ``ratio`` is face-bbox height / image height. Below
+    :data:`HEAD_HEIGHT_WARN_BELOW` the head is implausibly small for any
+    framing with a visible face, so a warning is returned (reported in
+    the infotext, never fatal). Zero/negative/unparseable input yields
+    (0.0, None) — not measured, not a warning.
+    """
+    try:
+        ratio = float(face_h) / float(img_h)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0, None
+    if ratio <= 0:
+        return 0.0, None
+    if ratio < HEAD_HEIGHT_WARN_BELOW:
+        return ratio, (
+            "head height is only %.1f%% of the frame; proportions may look "
+            "off — try a closer crop" % (ratio * 100.0))
+    return ratio, None
 
 
 def decide_mode(strength: float, family: str, adapter_available: bool):
