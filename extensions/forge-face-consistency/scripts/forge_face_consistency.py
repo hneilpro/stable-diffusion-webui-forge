@@ -335,61 +335,80 @@ if _FORGE_AVAILABLE:
                 plan["reason"] = "enabled but no reference image or folder given"
                 _log("enabled with no reference; doing nothing")
                 return
-            family = _detect_family_forge(p)
-            adapter, _names = _available_adapters()
-            mode, downgraded, reason = logic.decide_mode(
-                plan["strength"], family, adapter is not None)
-            plan.update(family=family, downgraded=downgraded, reason=reason)
-            if mode == "controlnet" and adapter is not None:
-                kind, preprocessor_name, model_name = adapter
-                # F1: the unit needs a concrete image. A folder-only (or
-                # folder-overriding) reference must hand ControlNet a
-                # decoded representative, never np.asarray(None).
-                unit_rgb, unit_src = representative_rgb_for_unit(
-                    ref_image, refs_dir)
-                if unit_rgb is None:
-                    mode = "blended-swap"
-                    plan.update(mode=mode, downgraded=True,
-                                reason=f"no reference image for ControlNet unit "
-                                       f"({unit_src}); using blended swap")
-                    _log(f"ControlNet unit image unavailable ({unit_src}); "
-                         f"downgrading to blended swap")
-                else:
-                    unit = _build_controlnet_unit(preprocessor_name, model_name,
-                                                  plan["strength"], unit_rgb)
-                    plan["controlnet_image_source"] = unit_src
-                    if _inject_controlnet_unit(p, unit):
-                        plan["mode"] = kind
-                        plan["controlnet_model"] = model_name
-                        _log(f"injected ControlNet {kind} unit "
-                             f"(model={model_name}, weight={plan['strength']:.2f}, "
-                             f"image={unit_src})")
-                    else:
+            try:
+                family = _detect_family_forge(p)
+                adapter, _names = _available_adapters()
+                mode, downgraded, reason = logic.decide_mode(
+                    plan["strength"], family, adapter is not None)
+                plan.update(family=family, downgraded=downgraded, reason=reason)
+                if mode == "controlnet" and adapter is not None:
+                    kind, preprocessor_name, model_name = adapter
+                    # F1: the unit needs a concrete image. A folder-only (or
+                    # folder-overriding) reference must hand ControlNet a
+                    # decoded representative, never np.asarray(None).
+                    unit_rgb, unit_src = representative_rgb_for_unit(
+                        ref_image, refs_dir)
+                    if unit_rgb is None:
                         mode = "blended-swap"
                         plan.update(mode=mode, downgraded=True,
-                                    reason="ControlNet injection failed (no free slot); "
-                                           "using blended swap")
-                        _log("ControlNet injection failed; downgrading to blended swap")
-            elif mode == "controlnet":
-                mode = "blended-swap"
-                plan.update(mode=mode, downgraded=True,
-                            reason="adapter reported available but unresolved; "
-                                   "using blended swap")
-            else:
-                plan["mode"] = mode
-            if plan["mode"] in ("swap", "blended-swap"):
+                                    reason=f"no reference image for ControlNet unit "
+                                           f"({unit_src}); using blended swap")
+                        _log(f"ControlNet unit image unavailable ({unit_src}); "
+                             f"downgrading to blended swap")
+                    else:
+                        unit = _build_controlnet_unit(preprocessor_name, model_name,
+                                                      plan["strength"], unit_rgb)
+                        plan["controlnet_image_source"] = unit_src
+                        if _inject_controlnet_unit(p, unit):
+                            plan["mode"] = kind
+                            plan["controlnet_model"] = model_name
+                            _log(f"injected ControlNet {kind} unit "
+                                 f"(model={model_name}, weight={plan['strength']:.2f}, "
+                                 f"image={unit_src})")
+                        else:
+                            mode = "blended-swap"
+                            plan.update(mode=mode, downgraded=True,
+                                        reason="ControlNet injection failed (no free slot); "
+                                               "using blended swap")
+                            _log("ControlNet injection failed; downgrading to blended swap")
+                elif mode == "controlnet":
+                    mode = "blended-swap"
+                    plan.update(mode=mode, downgraded=True,
+                                reason="adapter reported available but unresolved; "
+                                       "using blended swap")
+                else:
+                    plan["mode"] = mode
+                if plan["mode"] in ("swap", "blended-swap"):
+                    plan["ref_bgr"] = _ref_to_bgr(ref_image)
+                    plan["refs_dir"] = str(refs_dir).strip() if refs_dir else ""
+            except Exception as exc:
+                # Setup failure must never kill the host generation or
+                # vanish silently: live round 2 (2026-10-08) showed an
+                # unguarded raise in this block leaves plan mode at
+                # "disabled" with nothing in the infotext to explain it.
+                # Record the failure, fall back to a blended swap, and
+                # let generation continue.
+                import traceback
+
+                traceback.print_exc()
+                plan["error"] = str(exc)
                 plan["ref_bgr"] = _ref_to_bgr(ref_image)
                 plan["refs_dir"] = str(refs_dir).strip() if refs_dir else ""
+                plan.update(mode="blended-swap", downgraded=True,
+                            reason=f"setup failed ({exc}); using blended swap")
+                _log(f"setup FAILED ({exc}); falling back to blended swap")
             p.extra_generation_params.update({
                 "FaceConsistency mode": plan["mode"],
                 "FaceConsistency strength": f"{plan['strength']:.2f}",
-                "FaceConsistency family": family,
+                "FaceConsistency family": plan.get("family", "unknown"),
             })
+            if plan.get("error"):
+                p.extra_generation_params["FaceConsistency error"] = plan["error"]
             if plan["downgraded"]:
                 p.extra_generation_params["FaceConsistency downgrade"] = plan["reason"]
                 _log(f"downgrade: {plan['reason']}")
             _log(f"mode={plan['mode']} strength={plan['strength']:.2f} "
-                 f"family={family} ({plan['reason']})")
+                 f"family={plan.get('family', 'unknown')} ({plan['reason']})")
 
         # -- swap / blended swap (per generated image) --------------------
         def postprocess_image(self, p, pp, enabled, ref_image, refs_dir, strength, restore):

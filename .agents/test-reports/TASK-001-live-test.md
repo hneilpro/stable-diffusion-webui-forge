@@ -81,3 +81,44 @@ API-safe — an F6 sub-criterion found live, exactly as the gate intended.
 - Flux strength=1.0 swap similarity >= 0.55.
 - Arg order via alwayson_scripts is confirmed accepted (script-info +
   runs executed), but the enabled-path API run needs the retest above.
+
+---
+
+# Live round 2 — 2026-10-08 (after repair round 4, commit 2dc41d3)
+
+Same matrix, fresh tunnel (URL not recorded). Outputs:
+~/workspace/forge-live-test/out2/.
+
+| run | result |
+| --- | --- |
+| a2_off | SDXL baseline, sha 75772ed28e82 |
+| c2_sdxl_swap_max | mode=swap in infotext; extension-measured similarity 0.039 -> 0.938; restored by detail-graft; independent agent-side verify 0.938; 12.6% of pixels differ from baseline (>16/255). Viewed: face matches the reference; visible paste seam at the jaw/hairline from the detail-graft restore (no GFPGAN ONNX on the PC). PASS (>= 0.55) |
+| g2_strength0 | pixel-identical to baseline, mode=disabled recorded |
+| e2_ref_vj (0.85) | pixel-identical to baseline; infotext mode=disabled, no mode/family params — the setup block still raised before writing params |
+| f2_ref_wrong (0.85) | identical to e2_run — no injection |
+| Flux gens | checkpoint switch OK; txt2img returns HTTP 500 {"error":"AssertionError","message":"You do not have CLIP state dict!"} even with the extension absent — his Flux checkpoint carries no CLIP/T5 encoders and Forge has none loaded. Flux generation itself is blocked on the PC until encoder files are installed; not an extension failure. SDXL checkpoint re-selected afterwards and verified via /sdapi/v1/options. |
+
+## Repair round 5 (this VM; not yet committed)
+
+Round 2's injection failure sat in the unguarded setup block: build/
+inject of the ControlNet unit raised, Forge logged to its console,
+generation continued with the plan at mode=disabled and nothing in the
+infotext. Fix: the whole setup block is wrapped — on any exception the
+script prints the traceback, records "FaceConsistency error" in the
+infotext, and downgrades loudly to blended swap so the next live run
+(self-)reports the exact exception over the API. Params (mode/strength/
+family) are now written even on that path. +2 offline tests (build
+failure, family-probe failure -> recorded blended-swap downgrade);
+suite 44 passed, py_compile OK.
+
+## F6 status after round 2
+
+- Loads (txt2img/img2img): PASS (round 1).
+- OFF byte-identical: PASS (round 1).
+- API alwayson path: PASS for the swap route (c2 ran entirely through
+  alwayson_scripts).
+- SDXL swap >= 0.55: PASS (0.938, measured twice).
+- SDXL below-max injection pixel effect: FAIL so far — root-cause text
+  pending the round-5 self-report run (or the owner's console paste).
+- Flux swap >= 0.55: BLOCKED on the PC (no CLIP state dict); needs
+  text-encoder files installed or an owner waiver for this sub-point.

@@ -23,6 +23,11 @@ Next: <owner/role + exact next action, or "none">
 ---
 
 <!-- Post new entries below this line, newest first. -->
+## 2026-10-08 — builder — TASK-001 — live round 2: SDXL swap passes (0.938); repair round 5 pushed
+Round 2 on the owner's 4090 (commit 2dc41d3): SDXL max-strength swap passes in Forge — ArcFace 0.938 measured by the extension and independently (detail-graft restore, visible seam, no GFPGAN on the PC); alwayson API path passes with it. Below-max ControlNet injection still failed silently — an exception inside the then-unguarded setup block (unit build/inject) left the plan at mode=disabled with no infotext trace; repair round 5 wraps setup so failures print, land in the infotext, and downgrade loudly to blended swap (44 offline tests pass). Flux generation is blocked on the PC: Forge 500 "You do not have CLIP state dict!" — the owner's encoders (clip_l + t5xxl_fp8 in models/text_encoder/, ae in models/VAE/) exist but were not attached; retest will attach them via the forge_additional_modules option.
+Evidence: .agents/test-reports/TASK-001-live-test.md (round 2), .agents/handoffs/TASK-001-repair-5-handoff.md
+Next: owner pulls + restarts Forge; builder retest round 3 (injection self-report + pixel diff; Flux swap with encoders attached); critic re-scores F6 only.
+
 ## 2026-10-07 — builder — TASK-001 — repair round 4 committed + pushed on owner go
 Owner approved commit + push of the API string-ref fix (script + 7 tests + live test report + handoff). Owner pulls on the PC and restarts Forge, then relays readiness (fresh tunnel URL if cloudflared restarted).
 Evidence: .agents/test-reports/TASK-001-live-test.md, .agents/handoffs/TASK-001-repair-4-handoff.md

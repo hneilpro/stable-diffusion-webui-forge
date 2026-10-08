@@ -436,6 +436,46 @@ def test_before_process_string_ref_at_max_sets_swap_ref():
     assert isinstance(ref_bgr, np.ndarray) and ref_bgr.shape == (5, 6, 3)
 
 
+# --- setup failure falls back loudly, never raises (live round 2) -----------
+#
+# Live round 2 (2026-10-08): SDXL swap worked, but the below-max
+# ControlNet path still produced mode=disabled with no explanation —
+# something in the setup block raised and the host generation continued
+# with the plan stuck at its initial value. Setup failures must land in
+# the infotext and downgrade to blended swap instead of vanishing.
+
+
+def test_controlnet_build_failure_downgrades_not_raises(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("unit build exploded")
+
+    monkeypatch.setattr(mod, "_build_controlnet_unit", boom)
+    _patch_adapter(monkeypatch)
+    args = [SimpleNamespace(enabled=False)]
+    p = _fake_p(sd_model=_sdxl_model(), scripts=_cn_runner(args, [False]),
+                script_args=args)
+    _script().before_process(p, True, _b64_png(), "", 0.85, True)
+    assert p._ffc_plan["mode"] == "blended-swap"
+    assert p._ffc_plan["downgraded"] is True
+    assert "unit build exploded" in p.extra_generation_params[
+        "FaceConsistency downgrade"]
+    assert "unit build exploded" in p.extra_generation_params[
+        "FaceConsistency error"]
+    assert p.extra_generation_params["FaceConsistency mode"] == "blended-swap"
+
+
+def test_family_detection_failure_downgrades_not_raises(monkeypatch):
+    def boom(p):
+        raise RuntimeError("family probe exploded")
+
+    monkeypatch.setattr(mod, "_detect_family_forge", boom)
+    p = _fake_p(sd_model=_sdxl_model())
+    _script().before_process(p, True, _b64_png(), "", 0.85, True)
+    assert p._ffc_plan["mode"] == "blended-swap"
+    assert "family probe exploded" in p.extra_generation_params[
+        "FaceConsistency error"]
+
+
 def test_template_cache_key_separates_sources():
     from face_consistency.swap_engine import FaceSwapEngine
 
