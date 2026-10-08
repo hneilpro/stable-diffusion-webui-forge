@@ -773,3 +773,163 @@ def test_head_height_warns_when_tiny(monkeypatch):
     p = _run_blended_with_bbox(monkeypatch, 64, (1, 1, 5, 5), 0.93)
     assert "closer crop" in p.extra_generation_params[
         "FaceConsistency proportion"]
+
+
+# --- body-proportion gate (shell integration) ------------------------------
+
+_PASS_KP = {
+    "nose": (400.0, 150.0), "neck": (400.0, 200.0),
+    "shoulder_r": (510.0, 210.0), "shoulder_l": (290.0, 210.0),
+    "hip_r": (490.0, 480.0), "hip_l": (310.0, 480.0),
+    "ankle_r": (485.0, 802.0), "ankle_l": (315.0, 802.0),
+}
+_FAIL_KP = {
+    "nose": (400.0, 150.0), "neck": (400.0, 200.0),
+    "shoulder_r": (520.0, 210.0), "shoulder_l": (280.0, 210.0),
+    "hip_r": (530.0, 480.0), "hip_l": (270.0, 480.0),  # 2.6 heads: +44%
+    "ankle_r": (525.0, 850.0), "ankle_l": (275.0, 850.0),
+}
+_GATE_OPTS = {
+    "ffc_body_gate": "warn",
+    "ffc_body_tolerance": 0.15,
+    "ffc_ref_heads_tall": 7.0,
+    "ffc_ref_shoulder_hip": 1.23,
+    "ffc_ref_shoulder_heads": 2.2,
+    "ffc_ref_hip_heads": 1.8,
+    "ffc_ref_leg_fraction": 0.46,
+}
+
+
+def _run_faceid_with_gate(monkeypatch, gate_overrides, keypoints,
+                          head_bbox=(0.0, 0.0, 80.0, 100.0)):
+    """postprocess_image in a non-swap mode so only the gate runs."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2())
+    opts = dict(_GATE_OPTS)
+    opts.update(gate_overrides)
+    monkeypatch.setattr(mod, "_opt", lambda name, default: opts.get(name, default))
+    monkeypatch.setattr(mod, "_detect_body_keypoints",
+                        lambda p, bgr: keypoints)
+    monkeypatch.setattr(mod, "_head_bbox_for_gate",
+                        lambda p, bgr: head_bbox)
+    plan = {"enabled": True, "mode": "faceid", "strength": 0.85,
+            "restore": True, "verify_threshold": 0.55,
+            "downgraded": False, "reason": "test"}
+    p = _fake_p(_ffc_plan=plan)
+    pp = SimpleNamespace(image=np.zeros((64, 64, 3), dtype=np.uint8))
+    _script().postprocess_image(p, pp, True, None, "", 0.85, True)
+    return p
+
+
+def test_body_gate_off_is_noop(monkeypatch):
+    def _boom(p, bgr):
+        raise AssertionError("provider must not run when gate is off")
+
+    monkeypatch.setattr(mod, "_opt",
+                        lambda name, default: {"ffc_body_gate": "off"}.get(name, default))
+    monkeypatch.setattr(mod, "_detect_body_keypoints", _boom)
+    plan = {"enabled": True, "mode": "faceid", "strength": 0.85}
+    p = _fake_p(_ffc_plan=plan)
+    pp = SimpleNamespace(image=np.zeros((64, 64, 3), dtype=np.uint8))
+    _script().postprocess_image(p, pp, True, None, "", 0.85, True)
+    assert not any(k.startswith("FaceConsistency body")
+                   for k in p.extra_generation_params)
+
+
+def test_body_gate_warn_records_infotext(monkeypatch):
+    p = _run_faceid_with_gate(monkeypatch, {"ffc_body_gate": "warn"}, _FAIL_KP)
+    assert "FaceConsistency body" in p.extra_generation_params
+    warning = p.extra_generation_params["FaceConsistency body gate"]
+    assert warning.startswith("WARNING")
+    assert "hip width" in warning
+
+
+def test_body_gate_pass_records_measurements(monkeypatch):
+    p = _run_faceid_with_gate(monkeypatch, {"ffc_body_gate": "warn"}, _PASS_KP)
+    assert "7.02 heads tall" in p.extra_generation_params["FaceConsistency body"]
+    assert "FaceConsistency body gate" not in p.extra_generation_params
+
+
+def test_body_gate_reject_raises(monkeypatch):
+    import sys
+
+    from face_consistency import body_gate as body_gate_mod
+
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2())
+    monkeypatch.setattr(mod, "_opt", lambda name, default: {
+        **_GATE_OPTS, "ffc_body_gate": "reject"}.get(name, default))
+    monkeypatch.setattr(mod, "_detect_body_keypoints",
+                        lambda p, bgr: _FAIL_KP)
+    monkeypatch.setattr(mod, "_head_bbox_for_gate",
+                        lambda p, bgr: (0.0, 0.0, 80.0, 100.0))
+    plan = {"enabled": True, "mode": "faceid", "strength": 0.85}
+    p = _fake_p(_ffc_plan=plan)
+    pp = SimpleNamespace(image=np.zeros((64, 64, 3), dtype=np.uint8))
+    with pytest.raises(body_gate_mod.BodyProportionError):
+        _script().postprocess_image(p, pp, True, None, "", 0.85, True)
+    assert "REJECTED" in p.extra_generation_params["FaceConsistency body gate"]
+
+
+def test_body_gate_no_pose_degrades_loudly(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2())
+    monkeypatch.setattr(mod, "_opt",
+                        lambda name, default: _GATE_OPTS.get(name, default))
+    # Detector present but finds no pose.
+    monkeypatch.setattr(mod, "_get_pose_detector", lambda p: (lambda bgr: []))
+    plan = {"enabled": True, "mode": "faceid", "strength": 0.85}
+    p = _fake_p(_ffc_plan=plan)
+    pp = SimpleNamespace(image=np.zeros((64, 64, 3), dtype=np.uint8))
+    _script().postprocess_image(p, pp, True, None, "", 0.85, True)
+    assert "no pose detected" in p.extra_generation_params[
+        "FaceConsistency body gate"]
+
+
+def test_body_gate_detector_unavailable_degrades_loudly(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "cv2", _fake_cv2())
+    monkeypatch.setattr(mod, "_opt",
+                        lambda name, default: _GATE_OPTS.get(name, default))
+    monkeypatch.setattr(mod, "_get_pose_detector", lambda p: None)
+    plan = {"enabled": True, "mode": "faceid", "strength": 0.85}
+    p = _fake_p(_ffc_plan=plan)
+    pp = SimpleNamespace(image=np.zeros((64, 64, 3), dtype=np.uint8))
+    _script().postprocess_image(p, pp, True, None, "", 0.85, True)
+    assert "pose detector unavailable" in p.extra_generation_params[
+        "FaceConsistency body gate"]
+
+
+def test_body_gate_skipped_when_mode_disabled(monkeypatch):
+    def _boom(p, bgr):
+        raise AssertionError("gate must not run in disabled mode")
+
+    monkeypatch.setattr(mod, "_opt",
+                        lambda name, default: {"ffc_body_gate": "reject"}.get(name, default))
+    monkeypatch.setattr(mod, "_detect_body_keypoints", _boom)
+    plan = {"enabled": True, "mode": "disabled", "strength": 0.0}
+    p = _fake_p(_ffc_plan=plan)
+    pp = SimpleNamespace(image=np.zeros((64, 64, 3), dtype=np.uint8))
+    _script().postprocess_image(p, pp, True, None, "", 0.0, True)
+    assert not any(k.startswith("FaceConsistency body")
+                   for k in p.extra_generation_params)
+
+
+def test_body_gate_settings_registered(monkeypatch):
+    added = {}
+
+    class _Opts:
+        def add_option(self, name, info):
+            added[name] = info
+
+    monkeypatch.setattr(mod.shared, "opts",
+                        SimpleNamespace(add_option=_Opts().add_option, data={}))
+    monkeypatch.setattr(mod.shared, "OptionInfo",
+                        lambda *a, **k: ("OptionInfo", a, k))
+    mod._on_ui_settings()
+    for name in ("ffc_body_gate", "ffc_body_tolerance", "ffc_ref_heads_tall",
+                 "ffc_ref_shoulder_hip", "ffc_ref_shoulder_heads",
+                 "ffc_ref_hip_heads", "ffc_ref_leg_fraction"):
+        assert name in added, name

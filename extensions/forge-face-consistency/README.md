@@ -98,6 +98,35 @@ to look right, and no prompt wording fully corrects it. What works:
   infotext, warning when it drops below 7% — an implausibly small head
   for any framing with a visible face.
 
+### Body-proportion gate (automated)
+
+The face-similarity check only verifies the *face*; this gate checks
+the *body*. On every enabled generation it runs OpenPose (via the
+ControlNet annotator, in-process) on the finished image, reduces the
+pose to five proportions — body height in heads, shoulder:hip ratio,
+shoulder and hip width in heads, leg fraction of body height — and
+compares them against the reference profile under **Settings → Forge
+Face Consistency** (defaults are one specific person's measured
+proportions; change them for anyone else). The measured values are
+always written to the infotext (`FaceConsistency body`).
+
+Three modes:
+
+- `off` — the gate does nothing.
+- `warn` (default) — deviations beyond the tolerance (default ±15%)
+  are written as `FaceConsistency body gate: WARNING: ...` in the
+  infotext and the console log.
+- `reject` — a failing body **aborts the generation** with a
+  `BodyProportionError` naming the offending ratios, before the image
+  is presented.
+
+The gate runs in every face mode (swap, blended-swap, FaceID/InstantID
+ControlNet, outfit-only) because the body comes from diffusion in all
+of them — only the face is ever swapped. If the pose detector is
+unavailable or no pose is found, the gate degrades to a loud infotext
+note, never a silent skip. Waist:hip is deliberately not measured:
+keypoints carry no waist landmark, and guessing it would be dishonest.
+
 ## Use
 
 1. Open the **Forge Face Consistency** accordion (txt2img or img2img).

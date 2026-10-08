@@ -24,6 +24,15 @@ reference (or its skip reason), the ArcFace similarity before/after,
 and a head-height proportion assessment in the infotext. A downgrade
 is always logged, never silent. Flux never receives SDXL adapters.
 
+The body-proportion gate (Settings -> Forge Face Consistency) checks
+the *body* the way the verify threshold checks the face: OpenPose
+keypoints from the generated image are reduced to proportions
+(heads-tall, shoulder:hip, widths in head units, leg fraction) and
+compared against the reference profile. "warn" writes an infotext
+warning; "reject" aborts the generation before the image is presented.
+The pure measurement/assessment logic lives in
+face_consistency.body_gate (importable and unit-tested without Forge).
+
 The pure decision logic lives in face_consistency.logic (importable and
 unit-tested without Forge); this module is the Forge-facing shell.
 """
@@ -305,6 +314,167 @@ def _verify_threshold():
                           ffc_settings.DEFAULT_VERIFY_THRESHOLD))
     except (TypeError, ValueError):
         return ffc_settings.DEFAULT_VERIFY_THRESHOLD
+
+
+def _body_gate_config():
+    """(mode, tolerance, reference) for the body-proportion gate."""
+    mode = str(_opt(ffc_settings.OPT_BODY_GATE,
+                    ffc_settings.DEFAULT_BODY_GATE) or "warn")
+    try:
+        tolerance = float(_opt(ffc_settings.OPT_BODY_TOLERANCE,
+                               ffc_settings.DEFAULT_BODY_TOLERANCE))
+    except (TypeError, ValueError):
+        tolerance = ffc_settings.DEFAULT_BODY_TOLERANCE
+    reference = {}
+    for opt, default, key in (
+            (ffc_settings.OPT_REF_HEADS_TALL,
+             ffc_settings.DEFAULT_REF_HEADS_TALL, "heads_tall"),
+            (ffc_settings.OPT_REF_SHOULDER_HIP,
+             ffc_settings.DEFAULT_REF_SHOULDER_HIP, "shoulder_hip"),
+            (ffc_settings.OPT_REF_SHOULDER_HEADS,
+             ffc_settings.DEFAULT_REF_SHOULDER_HEADS, "shoulder_heads"),
+            (ffc_settings.OPT_REF_HIP_HEADS,
+             ffc_settings.DEFAULT_REF_HIP_HEADS, "hip_heads"),
+            (ffc_settings.OPT_REF_LEG_FRACTION,
+             ffc_settings.DEFAULT_REF_LEG_FRACTION, "leg_fraction")):
+        try:
+            reference[key] = float(_opt(opt, default))
+        except (TypeError, ValueError):
+            reference[key] = float(default)
+    return mode, tolerance, reference
+
+
+def _build_pose_detector():
+    """Callable bgr -> list of raw keypoint lists, or None.
+
+    Uses the ControlNet OpenPose annotator in-process when importable.
+    A missing/unimportable annotator is not an error: the gate degrades
+    to unmeasured with a loud infotext note.
+    """
+    try:
+        from annotator.openpose import OpenposeDetector
+
+        detector = OpenposeDetector()
+
+        def run(image_bgr):
+            import cv2
+
+            rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            poses = detector.detect_poses(rgb) or []
+            out = []
+            for pose in poses:
+                kps = getattr(getattr(pose, "body", None), "keypoints", None)
+                if kps:
+                    out.append(kps)
+            return out
+
+        return run
+    except Exception as exc:
+        _log(f"pose detector unavailable ({exc}); body gate unmeasured")
+        return None
+
+
+def _get_pose_detector(p):
+    """OpenPose detector cached on ``p``, or None (never raises)."""
+    det = getattr(p, "_ffc_pose_detector", "missing")
+    if det == "missing":
+        det = _build_pose_detector()
+        p._ffc_pose_detector = det
+    return det
+
+
+def _detect_body_keypoints(p, image_bgr):
+    """Normalized keypoints of the most complete pose, or None."""
+    from face_consistency import body_gate as body_gate_mod
+
+    run = _get_pose_detector(p)
+    if run is None:
+        return None
+    try:
+        poses = run(image_bgr) or []
+    except Exception as exc:
+        _log(f"pose detection failed ({exc})")
+        return None
+    best, best_n = None, -1
+    for raw in poses:
+        kp = body_gate_mod.normalize_keypoints(raw)
+        if len(kp) > best_n:
+            best, best_n = kp, len(kp)
+    return best
+
+
+def _head_bbox_for_gate(p, image_bgr):
+    """(x0, y0, x1, y1) of the largest detected face, or None."""
+    try:
+        engine = _get_engine(p)
+        faces = engine.detect(image_bgr)
+        if not faces:
+            return None
+        from face_consistency.swap_engine import largest as _largest
+
+        return tuple(float(v) for v in _largest(faces).bbox)
+    except Exception as exc:
+        _log(f"head bbox for body gate unavailable ({exc})")
+        return None
+
+
+def _run_body_gate(p, pp):
+    """Body-proportion gate on the generated image.
+
+    Runs for every enabled generation whose mode is not "disabled"
+    (the body comes from diffusion in every path; only the face is
+    ever swapped). Warns in the infotext, or raises
+    BodyProportionError in "reject" mode, when the measured
+    proportions deviate from the reference profile beyond tolerance.
+    Never raises in "warn"/"off" modes; a broken provider degrades to
+    a loud infotext note, never a silent skip.
+    """
+    from face_consistency import body_gate as body_gate_mod
+
+    mode, tolerance, reference = _body_gate_config()
+    if str(mode).strip().lower() == "off":
+        return
+    try:
+        import cv2
+
+        image_bgr = cv2.cvtColor(np.asarray(pp.image), cv2.COLOR_RGB2BGR)
+    except Exception as exc:
+        _log(f"body gate skipped: cannot decode image ({exc})")
+        return
+    keypoints = _detect_body_keypoints(p, image_bgr)
+    if not keypoints:
+        note = ("body gate: no pose detected"
+                if _get_pose_detector(p) is not None
+                else "body gate: pose detector unavailable")
+        p.extra_generation_params["FaceConsistency body gate"] = note
+        _log(f"WARNING: {note}")
+        return
+    bbox = _head_bbox_for_gate(p, image_bgr)
+    head_h = (bbox[3] - bbox[1]) if bbox else None
+    measured = body_gate_mod.measure_ratios(keypoints, head_h)
+    verdict, details = body_gate_mod.assess(measured, reference, tolerance)
+    if details:
+        p.extra_generation_params["FaceConsistency body"] = \
+            body_gate_mod.format_assessment(details)
+    action = body_gate_mod.decide_action(verdict, mode)
+    if action == "ok":
+        if verdict == "unmeasured":
+            note = "body gate: proportions unmeasurable (partial body?)"
+            p.extra_generation_params["FaceConsistency body gate"] = note
+            _log(f"WARNING: {note}")
+        return
+    failures = body_gate_mod.format_failures(details, tolerance)
+    if action == "warn":
+        p.extra_generation_params["FaceConsistency body gate"] = (
+            f"WARNING: body proportions deviate from reference -- {failures}")
+        _log(f"WARNING: body gate: {failures}")
+        return
+    # reject: fail loudly before the image is presented.
+    msg = (f"body-proportion gate REJECTED this image: {failures} "
+           f"[{body_gate_mod.format_assessment(details)}]")
+    p.extra_generation_params["FaceConsistency body gate"] = msg
+    _log(f"REJECT: {msg}")
+    raise body_gate_mod.BodyProportionError(msg)
 
 
 def _maybe_inject_character_lora(p, plan):
@@ -637,6 +807,12 @@ if _FORGE_AVAILABLE:
             plan = getattr(p, "_ffc_plan", None)
             if not plan or not plan.get("enabled"):
                 return
+            # Body-proportion gate: the body comes from diffusion in every
+            # mode (only the face is ever swapped), so this runs before
+            # the mode early-return. In "reject" mode a failing body
+            # aborts the generation here -- before the image is presented.
+            if plan["mode"] != "disabled":
+                _run_body_gate(p, pp)
             if plan["mode"] not in ("swap", "blended-swap"):
                 # No swap ran: the ControlNet reference path forms
                 # identity during diffusion, and outfit-only runs have no
@@ -795,6 +971,43 @@ if _FORGE_AVAILABLE:
             ffc_settings.DEFAULT_OUTFIT_STRENGTH,
             "Outfit / object reference default strength (0 = off)",
             gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_BODY_GATE, shared.OptionInfo(
+            ffc_settings.DEFAULT_BODY_GATE,
+            "Body-proportion gate: compare the generated body's proportions "
+            "against the reference profile below ('warn' = infotext warning, "
+            "'reject' = abort the generation before the image is presented)",
+            gr.Dropdown, {"choices": list(ffc_settings.BODY_GATE_MODES)},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_BODY_TOLERANCE, shared.OptionInfo(
+            ffc_settings.DEFAULT_BODY_TOLERANCE,
+            "Body-proportion gate tolerance (relative deviation, 0.15 = ±15%)",
+            gr.Slider, {"minimum": 0.0, "maximum": 0.5, "step": 0.01},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_REF_HEADS_TALL, shared.OptionInfo(
+            ffc_settings.DEFAULT_REF_HEADS_TALL,
+            "Reference body height, in head heights (e.g. 7.0)",
+            gr.Slider, {"minimum": 5.0, "maximum": 9.0, "step": 0.1},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_REF_SHOULDER_HIP, shared.OptionInfo(
+            ffc_settings.DEFAULT_REF_SHOULDER_HIP,
+            "Reference shoulder:hip width ratio (e.g. 1.23)",
+            gr.Slider, {"minimum": 0.8, "maximum": 1.6, "step": 0.01},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_REF_SHOULDER_HEADS, shared.OptionInfo(
+            ffc_settings.DEFAULT_REF_SHOULDER_HEADS,
+            "Reference shoulder width, in head heights (e.g. 2.2)",
+            gr.Slider, {"minimum": 1.0, "maximum": 3.5, "step": 0.05},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_REF_HIP_HEADS, shared.OptionInfo(
+            ffc_settings.DEFAULT_REF_HIP_HEADS,
+            "Reference hip width, in head heights (e.g. 1.8)",
+            gr.Slider, {"minimum": 1.0, "maximum": 3.0, "step": 0.05},
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_REF_LEG_FRACTION, shared.OptionInfo(
+            ffc_settings.DEFAULT_REF_LEG_FRACTION,
+            "Reference leg length as a fraction of body height (e.g. 0.46)",
+            gr.Slider, {"minimum": 0.3, "maximum": 0.6, "step": 0.01},
             section=section))
 
     on_ui_settings(_on_ui_settings)
