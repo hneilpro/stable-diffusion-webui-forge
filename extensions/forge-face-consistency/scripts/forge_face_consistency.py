@@ -926,9 +926,12 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
         fixed_small = fixed.resize((x1 - x0, y1 - y0), Image.LANCZOS)
         from face_consistency import blend as blend_mod
 
+        # blend_images expects both images full-frame: paste the fixed ROI
+        # into a full-frame copy first, then blend inside the feathered mask.
+        full = image_rgb.copy()
+        full[y0:y1, x0:x1] = np.asarray(fixed_small.convert("RGB"))
         mask = blend_mod.feather_mask((h, w), box, feather=6.0)
-        out = blend_mod.blend_images(
-            image_rgb, np.asarray(fixed_small.convert("RGB")), mask, 1.0)
+        out = blend_mod.blend_images(image_rgb, full, mask, 1.0)
         pp.image = Image.fromarray(out)
         note = (f"applied (ROI {x1 - x0}px at "
                 f"({expected[0]:.0f},{expected[1]:.0f}), 3x, denoise 0.35)")
