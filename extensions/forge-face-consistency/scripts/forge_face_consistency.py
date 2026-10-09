@@ -950,37 +950,63 @@ def _img2img_navel_pass(p, init_pil):
     Returns a PIL RGB image, or None on any failure. The processing
     object is flagged _ffc_nested so this script's own hooks ignore the
     nested generation (no recursion, no double gates).
+
+    The construction mirrors modules/api/api.py::img2imgapi -- the code
+    path that works on this box (the plain /sdapi/v1/img2img API). The
+    first live test of this detailer failed inside the nested
+    process_images call; the old construction left sampler_name=None
+    (silently picking all_samplers[0], a different sampler from the
+    outer generation), ran without the is_api flag, and let the nested
+    run write samples/grids into the user's output folders. Failures now
+    log the full traceback so the next one is diagnosable from the
+    console log instead of a bare "see log" note.
     """
     try:
-        from modules import processing, shared
+        from contextlib import closing
+
+        from modules import processing, sd_samplers, shared
 
         w, h = init_pil.size
         user_neg = getattr(p, "negative_prompt", "") or ""
         neg = ("deformed, disfigured, cartoon, drawing, blurry, "
                "watermark, text")
-        p2 = processing.StableDiffusionProcessingImg2Img(
+        # Resolve the sampler explicitly, inheriting the outer
+        # generation's sampler/scheduler so the nested pass behaves
+        # like the API call the user would make by hand.
+        sampler_name, scheduler = sd_samplers.get_sampler_and_scheduler(
+            getattr(p, "sampler_name", None) or None,
+            getattr(p, "scheduler", None) or None)
+        with closing(processing.StableDiffusionProcessingImg2Img(
             init_images=[init_pil],
             prompt=("close-up of a natural human navel, smooth realistic "
                     "skin, photorealistic, high detail"),
             negative_prompt=(user_neg + ", " + neg).strip(", "),
             seed=getattr(p, "seed", -1),
+            sampler_name=sampler_name,
+            scheduler=scheduler,
             steps=20,
             cfg_scale=float(getattr(p, "cfg_scale", 7.0) or 7.0),
             denoising_strength=0.35,
             width=w,
             height=h,
             sd_model=getattr(shared, "sd_model", None),
-        )
-        p2.script_args = []
-        p2._ffc_nested = True
-        processed = processing.process_images(p2)
+            do_not_save_samples=True,
+            do_not_save_grid=True,
+        )) as p2:
+            p2.is_api = True
+            p2.script_args = ()
+            p2._ffc_nested = True
+            processed = processing.process_images(p2)
         images = getattr(processed, "images", None) or []
         if not images:
             _log("navel detailer: img2img returned no images")
             return None
         return images[0].convert("RGB")
     except Exception as exc:
-        _log(f"navel detailer: img2img pass failed ({exc})")
+        import traceback
+
+        _log("navel detailer: img2img pass failed "
+             f"({type(exc).__name__}: {exc})\n{traceback.format_exc()}")
         return None
 
 
