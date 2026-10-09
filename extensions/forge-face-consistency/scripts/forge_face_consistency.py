@@ -873,14 +873,23 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
     The same pattern as the hand fix that works (crop -> 3x upscale ->
     img2img -> downscale -> feathered paste). Cleans up navel rendering
     and restores a stable navel position; it regenerates the navel,
-    never transplants identity -- the honest ceiling. Default off
-    (Settings -> Forge Face Consistency -> navel detailer). Never
-    raises; the nested generation is flagged so this script ignores it
-    (no recursion).
+    never transplants identity -- the honest ceiling. Per-run UI
+    checkbox (9th script arg), falling back to the Settings default
+    (Forge Face Consistency -> navel detailer). The repair box is
+    re-centered on the darkest midline feature (refine_navel_center)
+    and tone-matched to the original crop before the feathered paste,
+    so a mis-centered estimate no longer "repairs" fabric and the
+    paste leaves no visible boundary. Never raises; the nested
+    generation is flagged so this script ignores it (no recursion).
     """
     try:
-        if not bool(_opt(ffc_settings.OPT_NAVEL_DETAILER,
-                         ffc_settings.DEFAULT_NAVEL_DETAILER)):
+        # Per-run toggle (UI checkbox / 9th API arg); older 8-arg API
+        # calls leave it None, which falls back to the Settings default.
+        flag = getattr(p, "_ffc_navel_detailer", None)
+        if flag is None:
+            flag = bool(_opt(ffc_settings.OPT_NAVEL_DETAILER,
+                             ffc_settings.DEFAULT_NAVEL_DETAILER))
+        if not flag:
             return
         if getattr(p, "_ffc_nested", False):
             return
@@ -912,8 +921,15 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
             _log(note)
             return
         h, w = image_rgb.shape[:2]
-        side = torso_mod.crop_side_px(w, h, 0.18, 128)
-        box = torso_mod.square_box(w, h, expected[0], expected[1], side)
+        # Re-center on the darkest midline feature (the navel): the
+        # geometric estimate can sit tens of px off from pose-keypoint
+        # noise, and a mis-centered box "repairs" fabric instead of skin.
+        gray = (0.299 * image_rgb[:, :, 0] + 0.587 * image_rgb[:, :, 1]
+                + 0.114 * image_rgb[:, :, 2])
+        rcx, rcy = torso_mod.refine_navel_center(gray, expected[0],
+                                                 expected[1])
+        side = torso_mod.crop_side_px(w, h, 0.14, 96)
+        box = torso_mod.square_box(w, h, rcx, rcy, side)
         if box is None:
             note = "navel detailer skipped: navel ROI unusable"
             p.extra_generation_params[
@@ -935,15 +951,23 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
         fixed_small = fixed.resize((x1 - x0, y1 - y0), Image.LANCZOS)
         from face_consistency import blend as blend_mod
 
-        # blend_images expects both images full-frame: paste the fixed ROI
-        # into a full-frame copy first, then blend inside the feathered mask.
+        # Tone-match the repair to the original crop first: the img2img
+        # pass shifts overall tone, which reads as a visible patch
+        # boundary. blend_images expects full-frame inputs, so paste the
+        # fixed ROI into a full-frame copy, then blend inside a
+        # proportionally feathered mask.
+        fixed_np = np.asarray(fixed_small.convert("RGB"))
+        fixed_np = blend_mod.match_tone_to(fixed_np, crop)
         full = image_rgb.copy()
-        full[y0:y1, x0:x1] = np.asarray(fixed_small.convert("RGB"))
-        mask = blend_mod.feather_mask((h, w), box, feather=6.0)
+        full[y0:y1, x0:x1] = fixed_np
+        mask = blend_mod.feather_mask((h, w), box,
+                                      feather=max(8.0, (x1 - x0) / 8.0))
         out = blend_mod.blend_images(image_rgb, full, mask, 1.0)
         pp.image = Image.fromarray(out)
         note = (f"applied (ROI {x1 - x0}px at "
-                f"({expected[0]:.0f},{expected[1]:.0f}), 3x, denoise 0.35)")
+                f"({rcx:.0f},{rcy:.0f}) refined from "
+                f"({expected[0]:.0f},{expected[1]:.0f}), 3x, denoise 0.35, "
+                f"tone-matched)")
         p.extra_generation_params["FaceConsistency navel detailer"] = note
         _log(f"navel detailer {note}")
     except Exception as exc:
@@ -1105,6 +1129,8 @@ if _FORGE_AVAILABLE:
                                                  ffc_settings.DEFAULT_OUTFIT_STRENGTH))
             default_torso_strength = float(_opt(ffc_settings.OPT_TORSO_STRENGTH,
                                                 ffc_settings.DEFAULT_TORSO_STRENGTH))
+            default_navel_detailer = bool(_opt(ffc_settings.OPT_NAVEL_DETAILER,
+                                               ffc_settings.DEFAULT_NAVEL_DETAILER))
             with InputAccordion(default_enabled, label=SCRIPT_NAME,
                                 elem_id="ffc_accordion") as enabled:
                 ref_image = gr.Image(label="Reference face", type="numpy")
@@ -1127,21 +1153,29 @@ if _FORGE_AVAILABLE:
                     label="Torso reference strength (0 = off)",
                     minimum=0.0, maximum=1.0, step=0.01,
                     value=default_torso_strength)
+                navel_detailer = gr.Checkbox(
+                    label="Navel detailer pass (re-render navel ROI at 3x)",
+                    value=default_navel_detailer)
             self.infotext_fields = [
                 (enabled, "FaceConsistency enabled"),
                 (strength, "FaceConsistency strength"),
+                (navel_detailer, "FaceConsistency navel detailer"),
             ]
             return (enabled, ref_image, refs_dir, strength, restore,
-                    outfit_image, outfit_strength, torso_strength)
+                    outfit_image, outfit_strength, torso_strength,
+                    navel_detailer)
 
         # -- decision + ControlNet injection (runs before sampling) -------
         # New args (outfit_image, outfit_strength, torso_strength) append
         # at the end with defaults, so older 5-arg and 7-arg API calls
         # keep working.
+        # New arg (navel_detailer) appends at the end with a None
+        # default, so older 8-arg and 7-arg API calls keep working: None
+        # falls back to the Settings default.
         def before_process(self, p, enabled=False, ref_image=None, refs_dir="",
                            strength=1.0, restore=True,
                            outfit_image=None, outfit_strength=0.0,
-                           torso_strength=0.0):
+                           torso_strength=0.0, navel_detailer=None):
             # New generation: drop any engine cached by a previous run so
             # a changed inswapper path is honoured.
             if hasattr(p, "_ffc_engine"):
@@ -1151,6 +1185,10 @@ if _FORGE_AVAILABLE:
                     "downgraded": False, "reason": "disabled",
                     "verify_threshold": _verify_threshold()}
             p._ffc_plan = plan
+            if navel_detailer is None:
+                navel_detailer = bool(_opt(ffc_settings.OPT_NAVEL_DETAILER,
+                                           ffc_settings.DEFAULT_NAVEL_DETAILER))
+            p._ffc_navel_detailer = bool(navel_detailer)
             if not enabled:
                 return
             has_face_ref = (ref_image is not None
@@ -1286,7 +1324,7 @@ if _FORGE_AVAILABLE:
         def postprocess_image(self, p, pp, enabled=False, ref_image=None,
                               refs_dir="", strength=1.0, restore=True,
                               outfit_image=None, outfit_strength=0.0,
-                              torso_strength=0.0):
+                              torso_strength=0.0, navel_detailer=None):
             plan = getattr(p, "_ffc_plan", None)
             if not plan or not plan.get("enabled"):
                 return

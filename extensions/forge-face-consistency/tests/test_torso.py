@@ -133,3 +133,29 @@ def test_assess_navel_no_detection():
     dev, warn = torso.assess_navel((400.0, 374.0), None, 0.0, 126.0)
     assert dev is None
     assert warn is not None
+
+
+# --- refine_navel_center ------------------------------------------------
+
+
+def test_refine_navel_center_finds_dark_blob():
+    gray = np.full((768, 512), 220, dtype=np.uint8)
+    yy, xx = np.mgrid[0:768, 0:512]
+    blob = 60 * np.exp(-((xx - 300) ** 2 + (yy - 660) ** 2) / (2 * 6.0 ** 2))
+    gray = (gray - blob).astype(np.uint8)
+    x, y = torso.refine_navel_center(gray, 286, 615)
+    assert abs(x - 300) <= 6 and abs(y - 660) <= 6
+
+
+def test_refine_navel_center_falls_back_on_flat():
+    gray = np.full((768, 512), 220, dtype=np.uint8)
+    assert torso.refine_navel_center(gray, 286, 615) == (286, 615)
+
+
+def test_refine_navel_center_ignores_off_midline_darkness():
+    # Dark blob 60px off the midline: not a navel candidate, keep estimate.
+    gray = np.full((768, 512), 220, dtype=np.uint8)
+    yy, xx = np.mgrid[0:768, 0:512]
+    blob = 60 * np.exp(-((xx - 160) ** 2 + (yy - 615) ** 2) / (2 * 6.0 ** 2))
+    gray = (gray - blob).astype(np.uint8)
+    assert torso.refine_navel_center(gray, 286, 615) == (286, 615)

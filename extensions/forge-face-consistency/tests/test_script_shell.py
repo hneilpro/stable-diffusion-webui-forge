@@ -927,9 +927,42 @@ def test_body_gate_settings_registered(monkeypatch):
     monkeypatch.setattr(mod.shared, "opts",
                         SimpleNamespace(add_option=_Opts().add_option, data={}))
     monkeypatch.setattr(mod.shared, "OptionInfo",
-                        lambda *a, **k: ("OptionInfo", a, k))
+                        lambda *a, **k: ("OptionInfo", a, k),
+                        raising=False)
     mod._on_ui_settings()
     for name in ("ffc_body_gate", "ffc_body_tolerance", "ffc_ref_heads_tall",
                  "ffc_ref_shoulder_hip", "ffc_ref_shoulder_heads",
                  "ffc_ref_hip_heads", "ffc_ref_leg_fraction"):
         assert name in added, name
+
+
+# --- navel detailer UI toggle (9th arg) ----------------------------------
+
+
+def test_ui_returns_nine_args_with_navel_toggle():
+    inst = _script()
+    assert len(inst.ui(False)) == 9
+
+
+def test_before_process_navel_toggle_explicit_true():
+    inst = _script()
+    p = _fake_p()
+    inst.before_process(p, False, None, "", 0.85, True, None, 0.0, 0.0, True)
+    assert p._ffc_navel_detailer is True
+
+
+def test_before_process_navel_toggle_defaults_to_settings_off():
+    inst = _script()
+    p = _fake_p()
+    inst.before_process(p, False, None, "", 0.85, True)
+    assert p._ffc_navel_detailer is False
+
+
+def test_postprocess_image_accepts_nine_args():
+    inst = _script()
+    sentinel = object()
+    p = _fake_p(_ffc_plan={"enabled": False, "mode": "swap", "strength": 1.0})
+    pp = SimpleNamespace(image=sentinel)
+    assert inst.postprocess_image(p, pp, False, None, "", 1.0, True,
+                                  None, 0.0, 0.0, True) is None
+    assert pp.image is sentinel

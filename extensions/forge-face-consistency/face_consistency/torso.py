@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 # Vertical landmarks from the torso standard (heads below crown):
 # shoulders 1.39, waist 2.68, crotch 3.79. OpenPose has no waist
 # keypoint, so the waist line is interpolated between the shoulder and
@@ -91,6 +93,51 @@ def square_box(img_w, img_h, cx, cy, side):
         return None
     return (x0, y0, x1, y1)
 
+
+
+
+def _box_blur_5(a):
+    """5x5 mean blur, pure numpy (edge-padded), for navel refinement."""
+    k, pad = 5, 2
+    p = np.pad(a, pad, mode="edge")
+    c = np.cumsum(p, axis=1)
+    c = np.concatenate([np.zeros((c.shape[0], 1)), c], axis=1)
+    s = c[:, k:] - c[:, :-k]
+    c = np.cumsum(s, axis=0)
+    c = np.concatenate([np.zeros((1, c.shape[1])), c], axis=0)
+    s = c[k:, :] - c[:-k, :]
+    return s / float(k * k)
+
+
+def refine_navel_center(gray, cx, cy, search=64, band_half=24,
+                        min_contrast=12.0):
+    """Re-center a navel estimate on the darkest midline feature.
+
+    The geometric estimate (shoulders/hips keypoints) can sit tens of
+    pixels off from pose-keypoint noise; on bare skin the navel is the
+    darkest small feature near the midline. ``gray`` is a 2D array.
+    Returns (x, y) ints. Falls back to (cx, cy) when no feature darker
+    than ``min_contrast`` below the local median is found (uniform
+    skin, clothing, no confident candidate) -- never a wild guess.
+    """
+    h, w = gray.shape[:2]
+    cx_i, cy_i = int(round(cx)), int(round(cy))
+    x0, x1 = max(0, cx_i - search), min(w, cx_i + search)
+    y0, y1 = max(0, cy_i - search), min(h, cy_i + search)
+    if x1 <= x0 or y1 <= y0:
+        return (cx_i, cy_i)
+    win = np.asarray(gray[y0:y1, x0:x1], dtype=np.float32)
+    blurred = _box_blur_5(win)
+    bx = cx_i - x0
+    b0, b1 = max(0, bx - band_half), min(win.shape[1], bx + band_half)
+    if b1 <= b0:
+        return (cx_i, cy_i)
+    band = blurred[:, b0:b1]
+    jy, jx = np.unravel_index(int(np.argmin(band)), band.shape)
+    contrast = float(np.median(win) - band[jy, jx])
+    if contrast < min_contrast:
+        return (cx_i, cy_i)
+    return (x0 + b0 + int(jx), y0 + int(jy))
 
 def torso_box_for_crop(kp, img_w, img_h, margin_frac=0.30):
     """Square torso crop box from keypoints, or None.

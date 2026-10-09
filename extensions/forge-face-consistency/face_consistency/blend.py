@@ -73,3 +73,25 @@ def blend_images(original: np.ndarray, swapped: np.ndarray,
     out = (original.astype(np.float32) * (1.0 - alpha)
            + swapped.astype(np.float32) * alpha)
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def match_tone_to(src, ref):
+    """Match per-channel mean/std of ``src`` to ``ref`` (uint8 HxWx3).
+
+    A regenerated ROI drifts in overall tone from the img2img pass; the
+    drift reads as a visible patch boundary after pasting. Matching the
+    repair's tone to the original crop kills the boundary while keeping
+    the new detail (only the first two moments move, not structure).
+    """
+    src_f = np.asarray(src, dtype=np.float32)
+    ref_f = np.asarray(ref, dtype=np.float32)
+    out = np.empty_like(src_f)
+    for c in range(src_f.shape[2]):
+        s, r = src_f[..., c], ref_f[..., c]
+        s_std = float(s.std())
+        r_mean, r_std = float(r.mean()), float(r.std())
+        if s_std < 1e-3:
+            out[..., c] = r_mean
+        else:
+            out[..., c] = (s - float(s.mean())) * (r_std / s_std) + r_mean
+    return np.clip(out, 0, 255).astype(np.uint8)
