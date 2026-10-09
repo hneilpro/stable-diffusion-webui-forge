@@ -421,7 +421,13 @@ def _get_pose_detector(p):
 
 
 def _detect_body_keypoints(p, image_bgr):
-    """Normalized keypoints of the most complete pose, or None."""
+    """Pixel-space keypoints of the most complete pose, or None.
+
+    The OpenPose annotator returns normalized 0..1 coordinates; scale to
+    image pixels here so every downstream consumer (body-gate ratios,
+    torso/navel geometry) works in pixels, matching the unit tests and
+    the torso module's documented contract.
+    """
     from face_consistency import body_gate as body_gate_mod
 
     run = _get_pose_detector(p)
@@ -432,9 +438,12 @@ def _detect_body_keypoints(p, image_bgr):
     except Exception as exc:
         _log(f"pose detection failed ({exc})")
         return None
+    h, w = image_bgr.shape[:2]
     best, best_n = None, -1
     for raw in poses:
         kp = body_gate_mod.normalize_keypoints(raw)
+        if kp:
+            kp = {k: (x * w, y * h) for k, (x, y) in kp.items()}
         if len(kp) > best_n:
             best, best_n = kp, len(kp)
     return best
