@@ -1592,27 +1592,27 @@ if _FORGE_AVAILABLE:
             section=section))
         shared.opts.add_option(ffc_settings.OPT_REF_HEADS_TALL, shared.OptionInfo(
             ffc_settings.DEFAULT_REF_HEADS_TALL,
-            "Reference body height, in head heights (e.g. 7.0)",
+            "Reference body height, in gate-measured head heights (e.g. 8.5)",
             gr.Slider, {"minimum": 5.0, "maximum": 9.0, "step": 0.1},
             section=section))
         shared.opts.add_option(ffc_settings.OPT_REF_SHOULDER_HIP, shared.OptionInfo(
             ffc_settings.DEFAULT_REF_SHOULDER_HIP,
-            "Reference shoulder:hip width ratio (e.g. 1.23)",
+            "Reference shoulder:hip width ratio (e.g. 1.43)",
             gr.Slider, {"minimum": 0.8, "maximum": 1.6, "step": 0.01},
             section=section))
         shared.opts.add_option(ffc_settings.OPT_REF_SHOULDER_HEADS, shared.OptionInfo(
             ffc_settings.DEFAULT_REF_SHOULDER_HEADS,
-            "Reference shoulder width, in head heights (e.g. 2.2)",
+            "Reference shoulder width, in gate-measured head heights (e.g. 1.53)",
             gr.Slider, {"minimum": 1.0, "maximum": 3.5, "step": 0.05},
             section=section))
         shared.opts.add_option(ffc_settings.OPT_REF_HIP_HEADS, shared.OptionInfo(
             ffc_settings.DEFAULT_REF_HIP_HEADS,
-            "Reference hip width, in head heights (e.g. 1.8)",
+            "Reference hip width, in gate-measured head heights (e.g. 1.07)",
             gr.Slider, {"minimum": 1.0, "maximum": 3.0, "step": 0.05},
             section=section))
         shared.opts.add_option(ffc_settings.OPT_REF_LEG_FRACTION, shared.OptionInfo(
             ffc_settings.DEFAULT_REF_LEG_FRACTION,
-            "Reference leg length as a fraction of body height (e.g. 0.46)",
+            "Reference leg length as a fraction of body height (e.g. 0.52)",
             gr.Slider, {"minimum": 0.3, "maximum": 0.6, "step": 0.01},
             section=section))
 

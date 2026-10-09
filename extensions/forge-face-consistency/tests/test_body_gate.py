@@ -197,3 +197,62 @@ def test_format_assessment_and_failures():
     assert "hip width" in failures
     assert "+44" in failures  # +44.4% relative deviation
     assert "15%" in failures  # tolerance shown
+
+
+# --- default-profile calibration -------------------------------------------
+
+CALIBRATED_DEFAULTS = {
+    "heads_tall": 8.46,
+    "shoulder_hip": 1.43,
+    "shoulder_heads": 1.53,
+    "hip_heads": 1.07,
+    "leg_fraction": 0.52,
+}
+
+
+def _calibrated_coco18():
+    """COCO-18 keypoints reproducing the gate-measured reference photo.
+
+    Head height 100px; shoulders 153px (1.53 heads); hips 107px
+    (1.07 heads); body 846px tall (8.46 heads); legs 440px (52.0%).
+    These are the numbers the live gate measured on the person's real
+    front full-body reference photo (2026-10-09 calibration).
+    """
+    kp = [(0.0, 0.0, 0.0)] * 18
+    kp = [list(p) for p in kp]
+    kp[0] = [400.0, 124.0, 0.9]   # nose
+    kp[1] = [400.0, 200.0, 0.9]   # neck
+    kp[2] = [476.5, 260.0, 0.9]   # shoulder_r
+    kp[5] = [323.5, 260.0, 0.9]   # shoulder_l -> 153px
+    kp[8] = [453.5, 480.0, 0.9]   # hip_r
+    kp[11] = [346.5, 480.0, 0.9]  # hip_l -> 107px
+    kp[9] = [465.0, 700.0, 0.9]   # knee_r
+    kp[12] = [335.0, 700.0, 0.9]  # knee_l
+    kp[10] = [453.5, 920.0, 0.9]  # ankle_r
+    kp[13] = [346.5, 920.0, 0.9]  # ankle_l
+    return kp
+
+
+def test_default_profile_matches_gate_measurement():
+    """The shipped defaults must be the gate's own units.
+
+    Regression test for the 2026-10-09 calibration: the old tape-based
+    defaults (7.0/1.23/2.2/1.8/0.46) made the gate warn on the person's
+    real photo and on every matching generation. The defaults must accept
+    a body measuring exactly what the gate reads on the reference photo.
+    """
+    from face_consistency import settings as ffc_settings
+
+    reference = {
+        "heads_tall": ffc_settings.DEFAULT_REF_HEADS_TALL,
+        "shoulder_hip": ffc_settings.DEFAULT_REF_SHOULDER_HIP,
+        "shoulder_heads": ffc_settings.DEFAULT_REF_SHOULDER_HEADS,
+        "hip_heads": ffc_settings.DEFAULT_REF_HIP_HEADS,
+        "leg_fraction": ffc_settings.DEFAULT_REF_LEG_FRACTION,
+    }
+    for k, v in CALIBRATED_DEFAULTS.items():
+        assert reference[k] == pytest.approx(v, abs=0.005), k
+    kp = body_gate.normalize_keypoints(_calibrated_coco18())
+    measured = body_gate.measure_ratios(kp, HEAD_H)
+    verdict, details = body_gate.assess(measured, reference, TOL)
+    assert verdict == "pass", details

@@ -45,11 +45,21 @@ DEFAULT_NAVEL_GATE = "warn"
 DEFAULT_NAVEL_TEMPLATE = ""
 DEFAULT_BODY_GATE = "warn"
 DEFAULT_BODY_TOLERANCE = 0.15
-# Reference body proportions ("heads" = head heights), measured from the
-# person's front full-body reference photo. Defaults are one specific
-# person's measurements -- change them for anyone else.
-DEFAULT_REF_HEADS_TALL = 7.0
-DEFAULT_REF_SHOULDER_HIP = 1.23
-DEFAULT_REF_SHOULDER_HEADS = 2.2
-DEFAULT_REF_HIP_HEADS = 1.8
-DEFAULT_REF_LEG_FRACTION = 0.46
+# Reference body proportions for the body gate. "Heads" here are the gate's
+# own units: OpenPose keypoint distances divided by the InsightFace face-bbox
+# height -- NOT tape measurements. Keypoints sit at the joints (inside the
+# silhouette), so these run systematically smaller than tape-measured widths
+# (e.g. 1.53 vs 2.2 for shoulder width). Calibrated 2026-10-09 by running the
+# gate's own measurement (measure_ratios over OpenPose keypoints + InsightFace
+# head bbox) on the person's front full-body reference photo: the gate reads
+# 1.43/1.53/1.07/8.46/0.52 on the real photo, and generated bodies that match
+# the person read the same -- the old tape-based defaults warned on every
+# generation. To recalibrate for anyone else: photograph them front
+# full-body, run the same measurement, and set these five numbers to the
+# result. Defaults are one specific person's gate-measured profile -- change
+# them for anyone else.
+DEFAULT_REF_HEADS_TALL = 8.46
+DEFAULT_REF_SHOULDER_HIP = 1.43
+DEFAULT_REF_SHOULDER_HEADS = 1.53
+DEFAULT_REF_HIP_HEADS = 1.07
+DEFAULT_REF_LEG_FRACTION = 0.52
