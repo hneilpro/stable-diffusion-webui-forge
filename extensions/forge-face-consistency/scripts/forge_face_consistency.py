@@ -879,7 +879,10 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
     re-centered on the darkest midline feature (refine_navel_center)
     and tone-matched to the original crop before the feathered paste,
     so a mis-centered estimate no longer "repairs" fabric and the
-    paste leaves no visible boundary. Never raises; the nested
+    paste leaves no visible boundary. A skin gate (pick_repair_center)
+    repairs the refined point when it is on skin, else the geometric
+    estimate when it is on skin, and skips covered navels instead of
+    repainting clothing. Never raises; the nested
     generation is flagged so this script ignores it (no recursion).
     """
     try:
@@ -928,8 +931,22 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
                 + 0.114 * image_rgb[:, :, 2])
         rcx, rcy = torso_mod.refine_navel_center(gray, expected[0],
                                                  expected[1])
+        # Skin gate: repair the refined point when it is on skin, else
+        # the geometric estimate when *it* is on skin; skip when
+        # neither is (covered navel). Repairing clothing leaves a
+        # visible patch -- worse than no repair.
+        picked = torso_mod.pick_repair_center(
+            image_rgb, (expected[0], expected[1]), (rcx, rcy))
+        if picked is None:
+            note = ("navel detailer skipped: no skin at navel position "
+                    f"(estimate ({expected[0]:.0f},{expected[1]:.0f}))")
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+            _log(note)
+            return
+        ccx, ccy, src = picked
         side = torso_mod.crop_side_px(w, h, 0.14, 96)
-        box = torso_mod.square_box(w, h, rcx, rcy, side)
+        box = torso_mod.square_box(w, h, ccx, ccy, side)
         if box is None:
             note = "navel detailer skipped: navel ROI unusable"
             p.extra_generation_params[
@@ -964,10 +981,9 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
                                       feather=max(8.0, (x1 - x0) / 8.0))
         out = blend_mod.blend_images(image_rgb, full, mask, 1.0)
         pp.image = Image.fromarray(out)
-        note = (f"applied (ROI {x1 - x0}px at "
-                f"({rcx:.0f},{rcy:.0f}) refined from "
-                f"({expected[0]:.0f},{expected[1]:.0f}), 3x, denoise 0.35, "
-                f"tone-matched)")
+        note = (f"applied (ROI {x1 - x0}px at ({ccx},{ccy}) [{src}] "
+                f"from estimate ({expected[0]:.0f},{expected[1]:.0f}), "
+                f"3x, denoise 0.35, tone-matched)")
         p.extra_generation_params["FaceConsistency navel detailer"] = note
         _log(f"navel detailer {note}")
     except Exception as exc:

@@ -139,6 +139,41 @@ def refine_navel_center(gray, cx, cy, search=64, band_half=24,
         return (cx_i, cy_i)
     return (x0 + b0 + int(jx), y0 + int(jy))
 
+
+
+def skin_fraction(rgb, cx, cy, half=10):
+    """Fraction of skin-like pixels in the (2*half+1)^2 patch at (cx, cy).
+
+    Skin heuristic: bright and red-dominant (R > 95, R > G >= B,
+    R - B > 15). Used by the navel detailer to avoid "repairing"
+    clothing -- a covered navel must skip, not repaint denim.
+    """
+    h, w = rgb.shape[:2]
+    cx_i, cy_i = int(round(cx)), int(round(cy))
+    x0, x1 = max(0, cx_i - half), min(w, cx_i + half + 1)
+    y0, y1 = max(0, cy_i - half), min(h, cy_i + half + 1)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    px = np.asarray(rgb[y0:y1, x0:x1]).astype(int)
+    r, g, b = px[..., 0], px[..., 1], px[..., 2]
+    skin = (r > 95) & (r > g) & (g >= b) & ((r - b) > 15)
+    return float(skin.mean())
+
+
+def pick_repair_center(rgb, estimate, refined, threshold=0.45):
+    """Choose the navel-detailer repair center.
+
+    Prefers the refined (feature-detected) point when it is on skin,
+    else the geometric estimate when it is on skin, else None (skip:
+    the navel is covered, and repairing clothing leaves a visible
+    patch). Returns (x, y, source) with source "refined"/"estimate".
+    """
+    for (cx, cy), source in ((refined, "refined"),
+                             (estimate, "estimate")):
+        if skin_fraction(rgb, cx, cy) >= threshold:
+            return (int(round(cx)), int(round(cy)), source)
+    return None
+
 def torso_box_for_crop(kp, img_w, img_h, margin_frac=0.30):
     """Square torso crop box from keypoints, or None.
 
