@@ -880,9 +880,9 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
     and tone-matched to the original crop before the feathered paste,
     so a mis-centered estimate no longer "repairs" fabric and the
     paste leaves no visible boundary. A skin gate (pick_repair_center)
-    repairs the refined point when it is on skin, else the geometric
-    estimate when it is on skin, and skips covered navels instead of
-    repainting clothing. Never raises; the nested
+    repairs only a confirmed, on-skin navel feature and skips
+    otherwise -- repairing at an unconfirmed center paints a second
+    navel. Never raises; the nested
     generation is flagged so this script ignores it (no recursion).
     """
     try:
@@ -929,22 +929,23 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
         # noise, and a mis-centered box "repairs" fabric instead of skin.
         gray = (0.299 * image_rgb[:, :, 0] + 0.587 * image_rgb[:, :, 1]
                 + 0.114 * image_rgb[:, :, 2])
-        rcx, rcy = torso_mod.refine_navel_center(gray, expected[0],
-                                                 expected[1])
-        # Skin gate: repair the refined point when it is on skin, else
-        # the geometric estimate when *it* is on skin; skip when
-        # neither is (covered navel). Repairing clothing leaves a
-        # visible patch -- worse than no repair.
-        picked = torso_mod.pick_repair_center(
-            image_rgb, (expected[0], expected[1]), (rcx, rcy))
+        rcx, rcy, confirmed = torso_mod.refine_navel_center(
+            gray, expected[0], expected[1])
+        # Repair only at a confirmed, on-skin navel feature. No
+        # estimate fallback: repairing at an unconfirmed center makes
+        # the "navel close-up" prompt paint a second navel.
+        picked = torso_mod.pick_repair_center(image_rgb, (rcx, rcy),
+                                              confirmed)
         if picked is None:
-            note = ("navel detailer skipped: no skin at navel position "
+            why = ("no navel feature found"
+                   if not confirmed else "refined point not on skin")
+            note = (f"navel detailer skipped: {why} "
                     f"(estimate ({expected[0]:.0f},{expected[1]:.0f}))")
             p.extra_generation_params[
                 "FaceConsistency navel detailer"] = note
             _log(note)
             return
-        ccx, ccy, src = picked
+        ccx, ccy = picked
         side = torso_mod.crop_side_px(w, h, 0.14, 96)
         box = torso_mod.square_box(w, h, ccx, ccy, side)
         if box is None:
@@ -981,8 +982,8 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
                                       feather=max(8.0, (x1 - x0) / 8.0))
         out = blend_mod.blend_images(image_rgb, full, mask, 1.0)
         pp.image = Image.fromarray(out)
-        note = (f"applied (ROI {x1 - x0}px at ({ccx},{ccy}) [{src}] "
-                f"from estimate ({expected[0]:.0f},{expected[1]:.0f}), "
+        note = (f"applied (ROI {x1 - x0}px at ({ccx},{ccy}) "
+                f"[confirmed navel feature], "
                 f"3x, denoise 0.35, tone-matched)")
         p.extra_generation_params["FaceConsistency navel detailer"] = note
         _log(f"navel detailer {note}")

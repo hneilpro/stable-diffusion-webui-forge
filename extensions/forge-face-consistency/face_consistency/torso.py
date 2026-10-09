@@ -116,29 +116,32 @@ def refine_navel_center(gray, cx, cy, search=64, band_half=24,
     The geometric estimate (shoulders/hips keypoints) can sit tens of
     pixels off from pose-keypoint noise; on bare skin the navel is the
     darkest small feature near the midline. ``gray`` is a 2D array.
-    Returns (x, y) ints. Falls back to (cx, cy) when no feature darker
-    than ``min_contrast`` below the local median is found (uniform
-    skin, clothing, no confident candidate) -- never a wild guess.
+    Returns (x, y, confirmed): ``confirmed`` is True when a feature
+    darker than ``min_contrast`` below the local median was found.
+    Falls back to (cx, cy, False) when nothing confident is found
+    (uniform skin, clothing) -- never a wild guess. Callers must not
+    repair at an unconfirmed center: the img2img "navel close-up"
+    prompt paints a navel where the box is centered, so an off-center
+    repair creates a SECOND navel (observed live 2026-10-09).
     """
     h, w = gray.shape[:2]
     cx_i, cy_i = int(round(cx)), int(round(cy))
     x0, x1 = max(0, cx_i - search), min(w, cx_i + search)
     y0, y1 = max(0, cy_i - search), min(h, cy_i + search)
     if x1 <= x0 or y1 <= y0:
-        return (cx_i, cy_i)
+        return (cx_i, cy_i, False)
     win = np.asarray(gray[y0:y1, x0:x1], dtype=np.float32)
     blurred = _box_blur_5(win)
     bx = cx_i - x0
     b0, b1 = max(0, bx - band_half), min(win.shape[1], bx + band_half)
     if b1 <= b0:
-        return (cx_i, cy_i)
+        return (cx_i, cy_i, False)
     band = blurred[:, b0:b1]
     jy, jx = np.unravel_index(int(np.argmin(band)), band.shape)
     contrast = float(np.median(win) - band[jy, jx])
     if contrast < min_contrast:
-        return (cx_i, cy_i)
-    return (x0 + b0 + int(jx), y0 + int(jy))
-
+        return (cx_i, cy_i, False)
+    return (x0 + b0 + int(jx), y0 + int(jy), True)
 
 
 def skin_fraction(rgb, cx, cy, half=10):
@@ -160,19 +163,24 @@ def skin_fraction(rgb, cx, cy, half=10):
     return float(skin.mean())
 
 
-def pick_repair_center(rgb, estimate, refined, threshold=0.45):
-    """Choose the navel-detailer repair center.
+def pick_repair_center(rgb, refined, confirmed, threshold=0.45):
+    """Choose the navel-detailer repair center, or None to skip.
 
-    Prefers the refined (feature-detected) point when it is on skin,
-    else the geometric estimate when it is on skin, else None (skip:
-    the navel is covered, and repairing clothing leaves a visible
-    patch). Returns (x, y, source) with source "refined"/"estimate".
+    Repairs ONLY at a confirmed, on-skin refined point. There is no
+    estimate fallback: the geometric estimate runs ~40-50px high in
+    practice, and repairing at an unconfirmed center makes the img2img
+    "navel close-up" prompt paint a navel where the box is centered --
+    a second navel next to the real one (observed live 2026-10-09).
+    Skipping leaves the base render, which is always safer than a
+    hallucinated one. Returns (x, y) or None.
     """
-    for (cx, cy), source in ((refined, "refined"),
-                             (estimate, "estimate")):
-        if skin_fraction(rgb, cx, cy) >= threshold:
-            return (int(round(cx)), int(round(cy)), source)
+    if not confirmed:
+        return None
+    cx, cy = refined
+    if skin_fraction(rgb, cx, cy) >= threshold:
+        return (int(round(cx)), int(round(cy)))
     return None
+
 
 def torso_box_for_crop(kp, img_w, img_h, margin_frac=0.30):
     """Square torso crop box from keypoints, or None.

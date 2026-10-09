@@ -143,13 +143,14 @@ def test_refine_navel_center_finds_dark_blob():
     yy, xx = np.mgrid[0:768, 0:512]
     blob = 60 * np.exp(-((xx - 300) ** 2 + (yy - 660) ** 2) / (2 * 6.0 ** 2))
     gray = (gray - blob).astype(np.uint8)
-    x, y = torso.refine_navel_center(gray, 286, 615)
+    x, y, confirmed = torso.refine_navel_center(gray, 286, 615)
+    assert confirmed is True
     assert abs(x - 300) <= 6 and abs(y - 660) <= 6
 
 
 def test_refine_navel_center_falls_back_on_flat():
     gray = np.full((768, 512), 220, dtype=np.uint8)
-    assert torso.refine_navel_center(gray, 286, 615) == (286, 615)
+    assert torso.refine_navel_center(gray, 286, 615) == (286, 615, False)
 
 
 def test_refine_navel_center_ignores_off_midline_darkness():
@@ -158,7 +159,7 @@ def test_refine_navel_center_ignores_off_midline_darkness():
     yy, xx = np.mgrid[0:768, 0:512]
     blob = 60 * np.exp(-((xx - 160) ** 2 + (yy - 615) ** 2) / (2 * 6.0 ** 2))
     gray = (gray - blob).astype(np.uint8)
-    assert torso.refine_navel_center(gray, 286, 615) == (286, 615)
+    assert torso.refine_navel_center(gray, 286, 615) == (286, 615, False)
 
 
 # --- skin gate ------------------------------------------------------------
@@ -176,20 +177,28 @@ def test_skin_fraction_skin_vs_denim():
     assert torso.skin_fraction(black_top, 32, 32) == 0.0
 
 
-def test_pick_repair_center_prefers_refined_on_skin():
+def test_pick_repair_center_confirmed_on_skin():
     img = np.zeros((128, 128, 3), dtype=np.uint8)
     img[...] = (210, 170, 150)
-    assert torso.pick_repair_center(img, (60, 60), (70, 70))[2] == "refined"
+    assert torso.pick_repair_center(img, (70, 70), True) == (70, 70)
 
 
-def test_pick_repair_center_falls_back_to_estimate():
+def test_pick_repair_center_none_when_unconfirmed():
+    # Unconfirmed estimate is NEVER repaired: the "navel close-up"
+    # prompt would paint a second navel at the box center.
     img = np.zeros((128, 128, 3), dtype=np.uint8)
     img[...] = (210, 170, 150)
-    img[60:81, 60:81] = (70, 90, 140)  # denim patch over the refined point
-    assert torso.pick_repair_center(img, (30, 30), (70, 70)) == (30, 30, "estimate")
+    assert torso.pick_repair_center(img, (70, 70), False) is None
+
+
+def test_pick_repair_center_none_when_confirmed_not_on_skin():
+    img = np.zeros((128, 128, 3), dtype=np.uint8)
+    img[...] = (210, 170, 150)
+    img[60:81, 60:81] = (70, 90, 140)  # denim patch over the feature
+    assert torso.pick_repair_center(img, (70, 70), True) is None
 
 
 def test_pick_repair_center_none_when_covered():
     img = np.zeros((128, 128, 3), dtype=np.uint8)
     img[...] = (70, 90, 140)
-    assert torso.pick_repair_center(img, (30, 30), (70, 70)) is None
+    assert torso.pick_repair_center(img, (70, 70), True) is None
