@@ -28,3 +28,34 @@ def test_match_tone_to_identical_is_identity():
     a = rng.integers(0, 256, (16, 16, 3)).astype(np.uint8)
     out = match_tone_to(a, a)
     assert np.abs(out.astype(int) - a.astype(int)).max() <= 1
+
+
+def test_texture_preserving_roi_repairs_center():
+    import numpy as np
+    from face_consistency import blend
+    rep = np.full((40, 40, 3), 200, dtype=np.uint8)
+    orig = np.full((40, 40, 3), 100, dtype=np.uint8)
+    out = blend.texture_preserving_roi(rep, orig, (20, 20))
+    assert out.shape == (40, 40, 3) and out.dtype == np.uint8
+    assert out[20, 20].tolist() == [200, 200, 200]
+
+
+def test_texture_preserving_roi_keeps_original_grain_outside():
+    import numpy as np
+    from face_consistency import blend
+    rng = np.random.default_rng(0)
+    orig = (100 + 20 * rng.standard_normal((40, 40, 3))).clip(0, 255).astype(np.uint8)
+    rep = np.full((40, 40, 3), 100, dtype=np.uint8)  # smooth repair
+    out = blend.texture_preserving_roi(rep, orig, (20, 20))
+    # far corner: grain should follow the original, not the flat repair
+    assert abs(float(out[:8, :8].std()) - float(orig[:8, :8].std())) < 8.0
+    assert float(out[:8, :8].std()) > float(rep[:8, :8].std()) + 5.0
+
+
+def test_texture_preserving_roi_identical_is_identity():
+    import numpy as np
+    from face_consistency import blend
+    rng = np.random.default_rng(1)
+    img = (120 + 15 * rng.standard_normal((32, 32, 3))).clip(0, 255).astype(np.uint8)
+    out = blend.texture_preserving_roi(img, img, (16, 16))
+    assert np.abs(out.astype(int) - img.astype(int)).max() <= 2

@@ -95,3 +95,35 @@ def match_tone_to(src, ref):
         else:
             out[..., c] = (s - float(s.mean())) * (r_std / s_std) + r_mean
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def texture_preserving_roi(repaired, original, center_xy, protect_r=10.0,
+                           blend_r=14.0, sigma=2.0):
+    """Merge a regenerated ROI so its skin texture matches the original.
+
+    The img2img repair smooths fine skin grain; even after tone matching,
+    the pasted ROI reads as a visible patch at 200% zoom. This keeps the
+    repair's low frequencies (tone + regenerated feature shape) but
+    transplants the original's high frequencies (pores/grain) everywhere
+    except a small protected radius around ``center_xy`` -- the
+    regenerated feature itself -- where the repair wins fully, blending
+    out over ``blend_r`` pixels. Inputs are uint8 (H, W, 3) of equal
+    shape; the output is uint8.
+    """
+    rep = np.asarray(repaired, dtype=np.float32)
+    orig = np.asarray(original, dtype=np.float32)
+    low_rep = np.stack(
+        [gaussian_blur(rep[..., c], sigma) for c in range(rep.shape[2])],
+        axis=-1)
+    low_orig = np.stack(
+        [gaussian_blur(orig[..., c], sigma) for c in range(orig.shape[2])],
+        axis=-1)
+    high = orig - low_orig
+    h, w = rep.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dist = np.sqrt((xx - float(center_xy[0])) ** 2
+                   + (yy - float(center_xy[1])) ** 2)
+    protect = np.clip((dist - float(protect_r)) / float(blend_r),
+                      0.0, 1.0)[..., None]
+    out = protect * (low_rep + high) + (1.0 - protect) * rep
+    return np.clip(out, 0, 255).astype(np.uint8)

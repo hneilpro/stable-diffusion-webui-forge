@@ -878,8 +878,9 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
     (Forge Face Consistency -> navel detailer). The repair box is
     re-centered on the darkest midline feature (refine_navel_center)
     and tone-matched to the original crop before the feathered paste,
-    so a mis-centered estimate no longer "repairs" fabric and the
-    paste leaves no visible boundary. A skin gate (pick_repair_center)
+    so a mis-centered estimate no longer "repairs" fabric; a
+    texture-preserving merge then transplants the original skin grain
+    into the repair so the paste leaves no visible boundary. A skin gate (pick_repair_center)
     repairs only a confirmed, on-skin navel feature and skips
     otherwise -- repairing at an unconfirmed center paints a second
     navel. Never raises; the nested
@@ -976,6 +977,12 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
         # proportionally feathered mask.
         fixed_np = np.asarray(fixed_small.convert("RGB"))
         fixed_np = blend_mod.match_tone_to(fixed_np, crop)
+        # Texture-preserving paste: the img2img pass smooths skin grain,
+        # which reads as a patch boundary at 200% zoom even after tone
+        # matching. Keep the repair's shape/tone, transplant the original
+        # crop's high-frequency grain outside the repaired navel itself.
+        fixed_np = blend_mod.texture_preserving_roi(
+            fixed_np, crop, (ccx - x0, ccy - y0))
         full = image_rgb.copy()
         full[y0:y1, x0:x1] = fixed_np
         mask = blend_mod.feather_mask((h, w), box,
@@ -984,7 +991,7 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
         pp.image = Image.fromarray(out)
         note = (f"applied (ROI {x1 - x0}px at ({ccx},{ccy}) "
                 f"[confirmed navel feature], "
-                f"3x, denoise 0.35, tone-matched)")
+                f"3x, denoise 0.35, tone+texture-matched)")
         p.extra_generation_params["FaceConsistency navel detailer"] = note
         _log(f"navel detailer {note}")
     except Exception as exc:
