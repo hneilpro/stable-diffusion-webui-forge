@@ -7,8 +7,8 @@ from face_consistency import prompt_gate
 _CANONICAL = (
     "21-year-old adult fictional woman, petite young woman, petite delicate frame, "
     "slim athletic build, long dark brown wavy hair with center part, dark brown eyes, "
-    "tori_vj, <lora:tori_v1:0.8>, naturally full teardrop bust, wide-set, "
-    "soft shallow valley, no cleavage, gentle upper slope, "
+    "tori_vj, <lora:tori_v1:0.8>, natural medium teardrop bust, never inflated, "
+    "wide-set, soft shallow valley, gentle upper slope, relaxed soft shape, "
     "elegant ice-princess gown, plunging V-neckline, open-back, ultra-short hemline, "
     "sculptural cutouts, translucent skirt"
 )
@@ -52,8 +52,9 @@ def test_20262001_prompt_flags_hemline():
     p = ("21-year-old adult fictional woman, petite young woman, petite delicate frame, "
          "slim athletic build, long dark brown wavy hair with center part, dark brown eyes, "
          "natural eyebrows, soft oval face, natural makeup, soft slight smile, tori_vj, "
-         "<lora:tori_v1:0.8>, naturally full teardrop bust, wide-set, soft shallow valley, "
-         "no cleavage, gentle upper slope, elegant ice-princess gown, frosty ice-blue silk, "
+         "<lora:tori_v1:0.8>, natural medium teardrop bust, never inflated, wide-set, "
+         "soft shallow valley, gentle upper slope, relaxed soft shape, "
+         "elegant ice-princess gown, frosty ice-blue silk, "
          "plunging V-neckline, sculptural crystal-embellished bodice, open-back, "
          "long flowing skirt with frost details, delicate silver jewelry")
     n = ("tall, curvy, statuesque, crew neck, plastic skin, inflated cleavage, "
@@ -62,3 +63,29 @@ def test_20262001_prompt_flags_hemline():
     assert r["ok"], r
     assert any("hemline" in w for w in r["warnings"]), r["warnings"]
     assert "oversized bust" in r["auto_negative"], r
+
+
+def test_retuned_chest_block_passes_without_warnings():
+    # 2026-10-10 lock revision (3f18fd5): "natural medium ... never inflated"
+    # is the canonical wording now; the gate must not warn on it.
+    r = prompt_gate.check_prompt(_CANONICAL, _CANONICAL_NEG)
+    assert r["ok"] and not r["errors"], r
+    assert not any("chest block incomplete" in w for w in r["warnings"]), r["warnings"]
+
+
+def test_stale_naturally_full_chest_warns():
+    p = _CANONICAL.replace("natural medium teardrop bust, never inflated",
+                           "naturally full teardrop bust")
+    r = prompt_gate.check_prompt(p, _CANONICAL_NEG)
+    assert any("chest block incomplete" in w for w in r["warnings"]), r["warnings"]
+
+
+def test_cfg1_with_negative_warns_dead_negatives():
+    r = prompt_gate.check_prompt(_CANONICAL, _CANONICAL_NEG, cfg_scale=1.0)
+    assert r["ok"], r  # warn-only, never blocks
+    assert any("CFG=1.0" in w for w in r["warnings"]), r["warnings"]
+
+
+def test_cfg7_with_negative_no_cfg_warning():
+    r = prompt_gate.check_prompt(_CANONICAL, _CANONICAL_NEG, cfg_scale=7.0)
+    assert not any("CFG=1.0" in w for w in r["warnings"]), r["warnings"]

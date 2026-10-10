@@ -886,7 +886,8 @@ def _run_prompt_gate(p):
     try:
         result = prompt_gate_mod.check_prompt(
             getattr(p, "prompt", "") or "",
-            getattr(p, "negative_prompt", "") or "")
+            getattr(p, "negative_prompt", "") or "",
+            cfg_scale=getattr(p, "cfg_scale", None))
     except Exception as exc:
         _log(f"prompt gate failed ({exc})")
         return

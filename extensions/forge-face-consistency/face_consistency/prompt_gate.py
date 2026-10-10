@@ -17,8 +17,10 @@ from __future__ import annotations
 # Canonical identity block markers (prompt template v1.2).
 _IDENTITY_MARKERS = ("21-year-old", "petite delicate frame")
 
-# Chest block markers (positive prompt).
-_CHEST_MARKERS = ("naturally full", "teardrop", "no cleavage")
+# Chest block markers (positive prompt). Retuned 2026-10-10 (lock rev
+# 3f18fd5): "naturally full" overshot vs her refs; the canonical block is
+# now "natural medium ..., never inflated, ... relaxed soft shape".
+_CHEST_MARKERS = ("natural medium", "teardrop", "never inflated")
 
 # Anti-inflation terms that must be in the negative prompt.
 _CHEST_NEGATIVE_TERMS = ("inflated cleavage", "oversized bust")
@@ -40,14 +42,17 @@ _SHORT_HEM = ("ultra-short hemline", "ultra short hemline", "mini skirt",
 _BANNED = ("sheer", "see-through", "see through", "transparent", "nude")
 
 
-def check_prompt(prompt, negative=""):
+def check_prompt(prompt, negative="", cfg_scale=None):
     """Check a VJ prompt against the canonical blocks.
 
     Returns {"ok", "errors", "warnings", "auto_negative", "summary"}.
     ``ok`` is False only on hard errors (missing identity block, banned
     wording). Everything else warns. ``auto_negative`` lists negative
     terms the caller should append (anti-inflation terms missing while
-    the chest block is in use).
+    the chest block is in use). ``cfg_scale`` is optional; when it is
+    1.0 Forge skips unconditional conditioning and the negative prompt
+    is silently ignored -- the gate warns so the caller can move
+    critical constraints into positive wording.
     """
     p = (prompt or "").lower()
     n = (negative or "").lower()
@@ -70,6 +75,12 @@ def check_prompt(prompt, negative=""):
         warnings.append("negative prompt missing anti-inflation term(s): "
                         + ", ".join(missing_neg))
         auto_negative.extend(missing_neg)
+    if cfg_scale is not None and float(cfg_scale) == 1.0 and (negative or "").strip():
+        warnings.append(
+            "CFG=1.0: Forge skips unconditional conditioning -- negative "
+            "prompts are silently IGNORED; move every critical constraint "
+            "into positive wording (auto_negative terms appended above "
+            "will have no effect)")
     if not any(t in p for t in ("v-neck", "v neck", "plunging")):
         warnings.append("no V-neck/plunge token in prompt (never crew necks)")
     if "crew neck" in p and "crew neck" not in n:
