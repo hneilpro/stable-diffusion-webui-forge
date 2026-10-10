@@ -18,6 +18,7 @@ OPT_TORSO_DEPTH_PREPROCESSOR = "ffc_torso_depth_preprocessor"
 OPT_NAVEL_DETAILER = "ffc_navel_detailer"
 OPT_NAVEL_GATE = "ffc_navel_gate"
 OPT_NAVEL_TEMPLATE = "ffc_navel_template"
+OPT_PROMPT_GATE = "ffc_prompt_gate"
 OPT_BODY_GATE = "ffc_body_gate"
 OPT_BODY_TOLERANCE = "ffc_body_tolerance"
 OPT_REF_HEADS_TALL = "ffc_ref_heads_tall"
@@ -43,6 +44,7 @@ DEFAULT_TORSO_DEPTH_PREPROCESSOR = "depth_midas"
 DEFAULT_NAVEL_DETAILER = False
 DEFAULT_NAVEL_GATE = "warn"
 DEFAULT_NAVEL_TEMPLATE = ""
+DEFAULT_PROMPT_GATE = True
 DEFAULT_BODY_GATE = "warn"
 DEFAULT_BODY_TOLERANCE = 0.15
 # Reference body proportions for the body gate. "Heads" here are the gate's

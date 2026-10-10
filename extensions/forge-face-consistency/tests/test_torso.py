@@ -202,3 +202,74 @@ def test_pick_repair_center_none_when_covered():
     img = np.zeros((128, 128, 3), dtype=np.uint8)
     img[...] = (70, 90, 140)
     assert torso.pick_repair_center(img, (70, 70), True) is None
+
+# --- navel_in_anatomical_zone -------------------------------------------
+
+
+def test_navel_zone_accepts_midline_navel():
+    # Expected navel for _kp(): (400, ~373.9).
+    ok, reason = torso.navel_in_anatomical_zone(_kp(), 400, 374)
+    assert ok, reason
+
+
+def test_navel_zone_rejects_lateral_mole():
+    # 2026-10-09 seed 20262003: a mole off-midline was "confirmed" and
+    # painted as a navel. Midline x=400, shoulder width 220 ->
+    # lateral 115px > 26.4px limit: must reject.
+    ok, reason = torso.navel_in_anatomical_zone(_kp(), 285, 380)
+    assert not ok and "off-midline" in reason, reason
+
+
+def test_navel_zone_rejects_above_band():
+    ok, _ = torso.navel_in_anatomical_zone(_kp(), 400, 210)
+    assert not ok
+
+
+def test_navel_zone_rejects_below_band():
+    ok, _ = torso.navel_in_anatomical_zone(_kp(), 400, 480)
+    assert not ok
+
+
+def test_navel_zone_fail_open_on_missing_landmarks():
+    ok, reason = torso.navel_in_anatomical_zone({}, 400, 374)
+    assert ok and "skipped" in reason
+
+
+def test_navel_zone_rejects_non_numeric():
+    ok, _ = torso.navel_in_anatomical_zone(_kp(), "x", 374)
+    assert not ok
+
+# --- pose_frontal_enough ------------------------------------------------
+
+
+def _kp_frontal_nose():
+    kp = _kp()
+    kp["nose"] = (400.0, 100.0)
+    return kp
+
+
+def _kp_20262003():
+    # Real OpenPose detection from seed 20262003 (2026-10-09): 3/4 pose
+    # whose keypoint midline ran through the sheer side panel.
+    return {
+        "nose": (311.0, 258.0),
+        "shoulder_r": (157.0, 403.0),
+        "shoulder_l": (350.0, 416.0),
+        "hip_r": (242.0, 838.0),
+        "hip_l": (367.0, 837.0),
+    }
+
+
+def test_frontality_accepts_frontal():
+    ok, reason = torso.pose_frontal_enough(_kp_frontal_nose())
+    assert ok, reason
+
+
+def test_frontality_rejects_20262003_turn():
+    ok, reason = torso.pose_frontal_enough(_kp_20262003())
+    assert not ok and "3/4" in reason, reason
+
+
+def test_frontality_fail_open_on_missing_landmarks():
+    ok, reason = torso.pose_frontal_enough({})
+    assert ok and "skipped" in reason

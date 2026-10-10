@@ -866,6 +866,46 @@ def _run_navel_gate(p, pp, image_rgb=None, image_bgr=None, keypoints=None):
         _log(note)
 
 
+
+def _run_prompt_gate(p):
+    """Check the prompt against the VJ canonical blocks (warn-only).
+
+    2026-10-09 ice-princess run: the "ultra-short hemline" token was
+    dropped from the prompt (render grew a long skirt) and the chest
+    negative missed anti-inflation terms. This gate can never silently
+    pass a bad prompt, and never blocks a good one. Missing
+    anti-inflation negatives are appended to the negative prompt when
+    the chest block is in use -- logged, never silent. (Precedent:
+    _maybe_inject_character_lora already edits the prompt.)
+    """
+    try:
+        from face_consistency import prompt_gate as prompt_gate_mod
+    except Exception as exc:
+        _log(f"prompt gate unavailable ({exc})")
+        return
+    try:
+        result = prompt_gate_mod.check_prompt(
+            getattr(p, "prompt", "") or "",
+            getattr(p, "negative_prompt", "") or "")
+    except Exception as exc:
+        _log(f"prompt gate failed ({exc})")
+        return
+    p.extra_generation_params["FaceConsistency prompt gate"] = (
+        result["summary"])
+    for warning in result["warnings"]:
+        _log(f"WARNING: prompt gate: {warning}")
+    for error in result["errors"]:
+        _log(f"ERROR: prompt gate: {error}")
+    if result["auto_negative"]:
+        addition = ", ".join(result["auto_negative"])
+        existing = getattr(p, "negative_prompt", "") or ""
+        p.negative_prompt = ((existing + ", " + addition)
+                             if existing else addition)
+        p.extra_generation_params[
+            "FaceConsistency prompt gate negatives"] = f"appended: {addition}"
+        _log(f"prompt gate: appended to negative prompt: {addition}")
+
+
 def _maybe_run_navel_detailer(p, pp, keypoints=None):
     """Navel detailer pass: crop the navel ROI, upscale, low-denoise
     img2img, feathered paste-back.
@@ -924,6 +964,21 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
                 "FaceConsistency navel detailer"] = note
             _log(note)
             return
+        # Pose frontality gate (2026-10-09, seed 20262003): the
+        # geometric estimate assumes the 2D keypoint midline tracks
+        # the anatomical midline, which fails in 3/4 poses -- the
+        # midline ran through the sheer side panel and a navel was
+        # painted "on her side". The anatomical zone guard cannot
+        # catch this (same bad keypoints). Skip on untrustworthy
+        # geometry; the base render is always safer.
+        frontal_ok, frontal_reason = torso_mod.pose_frontal_enough(
+            keypoints)
+        if not frontal_ok:
+            note = f"navel detailer skipped: {frontal_reason}"
+            p.extra_generation_params[
+                "FaceConsistency navel detailer"] = note
+            _log(note)
+            return
         h, w = image_rgb.shape[:2]
         # Re-center on the darkest midline feature (the navel): the
         # geometric estimate can sit tens of px off from pose-keypoint
@@ -932,6 +987,22 @@ def _maybe_run_navel_detailer(p, pp, keypoints=None):
                 + 0.114 * image_rgb[:, :, 2])
         rcx, rcy, confirmed = torso_mod.refine_navel_center(
             gray, expected[0], expected[1])
+        # Anatomical plausibility guard (2026-10-09, seed 20262003):
+        # refine() confirms the darkest feature within +-24px of the
+        # keypoint midline estimate, but keypoint noise can shift that
+        # band onto a lateral dark feature (mole/shadow/fold). A navel
+        # is on the midline; an off-midline "confirmation" is not a
+        # navel and must never be repaired.
+        if confirmed:
+            zone_ok, zone_reason = torso_mod.navel_in_anatomical_zone(
+                keypoints, rcx, rcy)
+            if not zone_ok:
+                note = ("navel detailer skipped: refined point outside "
+                        f"anatomical navel zone ({zone_reason})")
+                p.extra_generation_params[
+                    "FaceConsistency navel detailer"] = note
+                _log(note)
+                return
         # Repair only at a confirmed, on-skin navel feature. No
         # estimate fallback: repairing at an unconfirmed center makes
         # the "navel close-up" prompt paint a second navel.
@@ -1215,6 +1286,11 @@ if _FORGE_AVAILABLE:
             p._ffc_navel_detailer = bool(navel_detailer)
             if not enabled:
                 return
+            # Prompt assembly gate (warn-only): a bad prompt can never
+            # pass silently; a good one is never blocked.
+            if bool(_opt(ffc_settings.OPT_PROMPT_GATE,
+                         ffc_settings.DEFAULT_PROMPT_GATE)):
+                _run_prompt_gate(p)
             has_face_ref = (ref_image is not None
                             or (refs_dir and str(refs_dir).strip()))
             outfit_rgb = _ref_to_rgb(outfit_image)
@@ -1572,6 +1648,12 @@ if _FORGE_AVAILABLE:
             "Navel detailer pass: re-render the navel ROI at 3x with a "
             "low-denoise img2img pass after generation (experimental; "
             "stabilizes navel position and rendering)",
+            section=section))
+        shared.opts.add_option(ffc_settings.OPT_PROMPT_GATE, shared.OptionInfo(
+            ffc_settings.DEFAULT_PROMPT_GATE,
+            "Prompt assembly gate: warn when the prompt drops VJ canonical "
+            "blocks (identity, LoRA, chest, wardrobe) and auto-append missing "
+            "anti-inflation negatives (warn-only; never blocks generation)",
             section=section))
         shared.opts.add_option(ffc_settings.OPT_NAVEL_GATE, shared.OptionInfo(
             ffc_settings.OPT_NAVEL_GATE,

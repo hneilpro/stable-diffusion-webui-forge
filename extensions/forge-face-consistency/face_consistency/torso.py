@@ -182,6 +182,130 @@ def pick_repair_center(rgb, refined, confirmed, threshold=0.45):
     return None
 
 
+# --- Anatomical plausibility zone for the navel detailer ----------------
+
+# A real navel sits on the torso midline, ~61% of the way from the
+# shoulder line to the hip line (torso standard: navel 2.85 heads below
+# crown; shoulders 1.39, crotch 3.79 -> (2.85-1.39)/(3.79-1.39) = 0.608).
+# refine_navel_center() confirms the darkest feature within +-24px of the
+# keypoint midline estimate -- but keypoint noise can shift that band onto
+# a lateral dark feature (mole/shadow/fold). Observed 2026-10-09
+# (seed 20262003): the detailer "confirmed" a mole at (285,680) and
+# painted a navel on her SIDE, off-midline. This guard rejects any
+# refined point outside the anatomical zone before a repair is allowed.
+NAVEL_ZONE_LATERAL_FRAC = 0.12  # of shoulder width, from the midline segment
+NAVEL_ZONE_TOP_FRAC = 0.45      # of shoulder->hip distance
+NAVEL_ZONE_BOTTOM_FRAC = 0.80   # of shoulder->hip distance
+
+
+def _point_segment_dist(px, py, ax, ay, bx, by):
+    """Perpendicular distance from point (px, py) to segment AB."""
+    dx, dy = bx - ax, by - ay
+    denom = dx * dx + dy * dy
+    if denom <= 0:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / denom
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def navel_in_anatomical_zone(kp, x, y):
+    """(ok, reason): is (x, y) a plausible navel position?
+
+    ``kp`` is {name: (x, y)} as produced by
+    ``body_gate.normalize_keypoints`` (pixel space). A navel must lie
+    close to the shoulder-mid -> hip-mid segment (laterally) and between
+    45% and 80% of the way from the shoulder line to the hip line
+    (vertically). Anything else -- a mole on the side, a shadow on the
+    waistband, a fold -- is not a navel and must never be repaired.
+    Fail-open when landmarks are unusable: the detailer already requires
+    shoulders+hips for its geometric estimate before this is consulted.
+    """
+    try:
+        sh_r, sh_l = kp["shoulder_r"], kp["shoulder_l"]
+        hip_r, hip_l = kp["hip_r"], kp["hip_l"]
+        sh_m = _mid(sh_r, sh_l)
+        hip_m = _mid(hip_r, hip_l)
+        shoulder_w = math.hypot(sh_r[0] - sh_l[0], sh_r[1] - sh_l[1])
+    except (KeyError, TypeError, IndexError):
+        return True, "landmarks missing; zone check skipped"
+    if not (math.isfinite(shoulder_w) and shoulder_w > 0):
+        return True, "landmarks missing; zone check skipped"
+    if not (math.isfinite(sh_m[1]) and math.isfinite(hip_m[1])
+            and hip_m[1] > sh_m[1]):
+        return True, "landmarks missing; zone check skipped"
+    try:
+        x, y = float(x), float(y)
+    except (TypeError, ValueError):
+        return False, "non-numeric point"
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return False, "non-finite point"
+    lateral = _point_segment_dist(x, y, sh_m[0], sh_m[1],
+                                  hip_m[0], hip_m[1])
+    limit = NAVEL_ZONE_LATERAL_FRAC * shoulder_w
+    if lateral > limit:
+        return False, (f"off-midline ({lateral:.0f}px lateral, "
+                       f"limit {limit:.0f}px)")
+    span = hip_m[1] - sh_m[1]
+    top = sh_m[1] + NAVEL_ZONE_TOP_FRAC * span
+    bottom = sh_m[1] + NAVEL_ZONE_BOTTOM_FRAC * span
+    if not (top <= y <= bottom):
+        return False, (f"outside vertical navel band (y={y:.0f}, "
+                       f"band {top:.0f}-{bottom:.0f})")
+    return True, "in anatomical navel zone"
+
+
+# --- Pose frontality gate for the navel detailer ------------------------
+
+# Maximum allowed horizontal offset of the nose from the shoulder
+# midline, as a fraction of shoulder width. The navel detailer's
+# geometric estimate assumes the 2D keypoint midline tracks the
+# anatomical midline. That assumption breaks in 3/4 poses: the head and
+# torso turn puts the projected midline somewhere that is NOT the
+# anatomical midline, so refine() "confirms" a dark feature on the side
+# of the torso and the detailer paints a navel there. Observed
+# 2026-10-09 (seed 20262003): nose 30% of shoulder width off the
+# shoulder midline; the keypoint midline ran through the sheer side
+# panel and a navel was painted "on her side", while the anatomical
+# zone guard (same bad keypoints) passed it. Beyond this threshold the
+# detailer skips -- the base render is always safer than a repair from
+# untrustworthy geometry.
+POSE_FRONTAL_NOSE_FRAC = 0.25
+
+
+def pose_frontal_enough(kp):
+    """(ok, reason): is the pose frontal enough for the navel detailer?
+
+    Checks that the nose sits above the shoulder midline (within
+    POSE_FRONTAL_NOSE_FRAC of shoulder width). A large offset means the
+    head/torso are turned enough that the 2D keypoint midline no longer
+    tracks the anatomical midline, and any "confirmed" navel position is
+    untrustworthy. Fail-open when landmarks are missing: the detailer
+    already requires shoulders+hips before this is consulted.
+    """
+    try:
+        nose = kp["nose"]
+        sh_m = _mid(kp["shoulder_r"], kp["shoulder_l"])
+        shoulder_w = math.hypot(kp["shoulder_r"][0] - kp["shoulder_l"][0],
+                                kp["shoulder_r"][1] - kp["shoulder_l"][1])
+    except (KeyError, TypeError, IndexError):
+        return True, "landmarks missing; frontality check skipped"
+    if not (math.isfinite(shoulder_w) and shoulder_w > 0):
+        return True, "landmarks missing; frontality check skipped"
+    try:
+        offset = abs(float(nose[0]) - float(sh_m[0]))
+    except (TypeError, ValueError, IndexError):
+        return True, "landmarks missing; frontality check skipped"
+    if not math.isfinite(offset):
+        return True, "landmarks missing; frontality check skipped"
+    limit = POSE_FRONTAL_NOSE_FRAC * shoulder_w
+    if offset > limit:
+        return False, (f"head {offset:.0f}px off shoulder midline "
+                       f"(limit {limit:.0f}px); 3/4 pose, "
+                       f"midline untrustworthy")
+    return True, "pose frontal enough"
+
+
 def torso_box_for_crop(kp, img_w, img_h, margin_frac=0.30):
     """Square torso crop box from keypoints, or None.
 
